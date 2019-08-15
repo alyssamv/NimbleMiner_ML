@@ -1,0 +1,1103 @@
+---
+title: "Deep Learning or NLP"
+author: Gary Nguyen
+output: html_notebook
+params:
+  data_folder: "~/Desktop/DSI_NimbleMiner/NimbleMiner_ML/Chunks/data/"
+editor_options: 
+  chunk_output_type: inline
+---
+
+## 0. INITIAL SETUP
+
+```{r installing_packages, echo = FALSE, message = FALSE, warning = FALSE, results = 'hide'}
+
+# Installing packages
+if(!require(devtools, quietly = TRUE)) install.packages('devtools')
+if(!require(pander, quietly = TRUE)) install.packages('pander')
+if(!require(knitr, quietly = TRUE)) install.packages('knitr')
+if(!require(dplyr, quietly = TRUE)) install.packages('dplyr')
+if(!require(tidyr, quietly = TRUE)) install.packages('tidyr')
+if(!require(stringr, quietly = TRUE)) install.packages('stringr')
+if(!require(lubridate, quietly = TRUE)) install.packages('lubridate')
+if(!require(purrr, quietly = TRUE)) install.packages('purrr')
+if(!require(DT, quietly = TRUE)) install.packages('DT')
+if(!require(tidytext, quietly = TRUE)) install.packages('tidytext')
+if(!require(ggplot2, quietly = TRUE)) install.packages('ggplot2')
+if(!require(textstem, quietly = TRUE)) install.packages('textstem')
+if(!require(tm, quietly = TRUE)) install.packages('tm')
+if(!require(splitstackshape, quietly = TRUE)) install.packages('splitstackshape')
+if(!require(text2vec, quietly = TRUE)) install.packages('text2vec')
+if(!require(reshape, quietly = TRUE)) install.packages('reshape')
+if(!require(readr, quietly = TRUE)) install.packages('readr')
+if(!require(zoo, quietly = TRUE)) install.packages('zoo')
+if(!require(keras, quietly = TRUE)) install.packages('keras')
+# if(!require(mskR, quietly = TRUE)) install.packages('mskR')
+```
+
+```{r loading_packages, , echo = FALSE, message = FALSE, warning = FALSE, results = 'hide'}
+pkg <- c("devtools"
+        ,"pander"
+        ,"knitr"
+        ,"dplyr"
+        ,"tidyr"
+        ,"stringr"
+        ,"lubridate"
+        ,"purrr"
+        ,"DT"
+        #,"mskR"
+        ,"tidytext"
+        ,"ggplot2"
+        ,"textstem"
+        ,"tm"
+        ,"splitstackshape"
+        ,"text2vec"
+        ,"reshape"
+        ,"readr"
+        , "zoo"
+        , "keras")
+invisible(lapply(pkg, library, character.only = TRUE))
+options(warn = 0)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+chunk_size = 1
+category = "Dyspnea"
+```
+
+```{r loading_data, message = FALSE, warning = FALSE, results = 'hide'}
+
+# LOADING ORIGINAL DATASET (GOLD STANDARD)
+file_name <- file.path(params$data_folder, 'gold_standard_HF_100_pt_AV.csv')
+
+clinical_notes_raw_data <- file_name %>% 
+  readr::read_csv() %>% 
+  # X1 is the index column, unselect this column
+  select(-X1) %>% 
+  # report_head indicates the start of a note
+  mutate(report_head = str_detect(Note, "^admission date"))
+
+# report_head contains the column report_no, a unique identifier for each report
+# the report_head dataframe contain report_no, a unique indentifier for each report
+report_head <- clinical_notes_raw_data %>% 
+  filter(report_head) %>% 
+  select(Note, report_head) %>% 
+  mutate(report_no = row_number()) %>% 
+  select(-report_head)
+
+clinical_notes_data <- clinical_notes_raw_data %>% 
+  # joint with report_head dataframe, report_no show which report each sentence belongs to
+  left_join(report_head, by = c("Note")) %>% 
+  mutate(report_no = na.locf(report_no),
+         # remove all numbers
+         Note = removeNumbers(Note)) %>% 
+  # remove lines with no sentences
+  filter(Note != "") %>% 
+  tidyr::unite(Categories, contains("category")) %>%
+  select(-contains("copy")) %>%
+  # remove unnecessary whitespaces
+  mutate(note_processed = str_squish(Note)) %>% 
+  transmute(note_processed,
+            report_head,
+            report_no,
+            Categories) %>%
+  filter(!report_head) %>% 
+  # Create 14 label columns (one-hot encoding)
+  mutate(dyspnea = as.numeric(grepl("Dyspnea", Categories)),
+         confusions = as.numeric(grepl("Confusion", Categories)),
+         fatique = as.numeric(grepl("Fatigue", Categories)),
+         abdomen.distension = as.numeric(grepl("abdomen.distension", Categories)),
+         cough = as.numeric(grepl("Cough", Categories)),
+         peripheral.edema = as.numeric(grepl("peripheral.edema", Categories)),
+         anorexia = as.numeric(grepl("Anorexia", Categories)),
+         wheeze = as.numeric(grepl("Wheeze", Categories)),
+         weight.change = as.numeric(grepl("Weight.loss.or.weight.gain", Categories)),
+         nausea = as.numeric(grepl("Nausea", Categories)),
+         chest.pain = as.numeric(grepl("Chest.pain", Categories)),
+         palpitation = as.numeric(grepl("Palpitation", Categories)),
+         exercise.intolerance = as.numeric(grepl("Exercise.intolerance", Categories)),
+         dizziness = as.numeric(grepl("Dizziness", Categories))) %>% 
+  # replace NA with 0
+  replace(is.na(.), 0) %>% 
+  select(-c(Categories, report_head))
+
+no_original_report <- clinical_notes_data %>% 
+  pull(report_no) %>% 
+  max()
+```
+
+```{r loading_additional_data, message = FALSE, warning = FALSE, results = 'hide'}
+
+# LABELED SENTENCES BY SIMCLINS
+# Same logic for processing dataset as above. Import labeled data - labeled by NimbleMiner for Dyspnea
+
+labeled_training_notes_file <- file.path(params$data_folder, 'training_notes_NMlabeled_chunk1.csv')
+additional_data <- labeled_training_notes_file %>%
+  readr::read_csv() %>%
+  select(-X1) %>%
+  mutate(report_head = str_detect(Note, "^admission date"))
+
+additional_report_head <- additional_data %>%
+  filter(report_head) %>%
+  select(Note, report_head) %>%
+  mutate(report_no = row_number() + no_original_report) %>%
+  select(-report_head)
+
+clinical_notes_data_additional <- additional_data %>%
+  left_join(additional_report_head, by = c("Note")) %>%
+  mutate(report_no = na.locf(report_no),
+         Note = removeNumbers(Note)) %>%
+  filter(Note != "") %>%
+  mutate(note_processed = str_squish(Note)) %>%
+  transmute(note_processed,
+            dyspnea = as.numeric(Label),
+            report_head,
+            report_no) %>%
+  filter(!report_head) %>%
+  replace(is.na(.), 0) %>%
+  select(-report_head)
+```
+
+```{r full_data, message = FALSE, warning = FALSE, results = 'hide'}
+no_all_report <- clinical_notes_data_additional %>%
+  pull(report_no) %>%
+  max()
+
+# Bind rows of gold standard dataset and simclin dataset
+clinical_notes_data_before_sampling <- clinical_notes_data %>% 
+  bind_rows(clinical_notes_data_additional) %>% 
+  # Additional dataset only has 3 columns, so the rest of the labels will show NAs, replace those NAs with 0.
+  replace(is.na(.), 0) %>% 
+  # The sentence with at least 1 label will have "with_labels" as TRUE
+  mutate(with_labels = if_else(rowSums(.[3:16]) > 0, TRUE, FALSE))
+
+# There are 15,512 in total but only 1,605 with labels
+clinical_notes_data_with_labels <- clinical_notes_data_before_sampling %>% 
+  filter(with_labels)
+num_clinical_notes_data_with_labels <- clinical_notes_data_before_sampling %>% 
+  filter(with_labels) %>% 
+  nrow()
+
+# Randomly sample 1,605 * 2 = 3,210 sentences without label for the final dataset
+clinical_notes_data_without_labels <- clinical_notes_data_before_sampling %>% 
+  filter(!with_labels) %>% 
+  sample_n(num_clinical_notes_data_with_labels * 2)
+
+# The final dataset will contain 4,815 rows
+full_clinical_notes_data <- clinical_notes_data_with_labels %>% 
+  bind_rows(clinical_notes_data_without_labels)
+
+# For report_level analysis
+full_report_label <- full_clinical_notes_data %>% 
+  group_by(report_no) %>% 
+  summarize(sum_dyspnea = sum(dyspnea)) %>%
+            # sum_confusions = sum(confusions),
+            # sum_fatique = sum(fatique),
+            # sum_abdomen.distension = sum(abdomen.distension),
+            # sum_cough = sum(cough),
+            # sum_peripheral.edema = sum(peripheral.edema),
+            # sum_anorexia = sum(anorexia),
+            # sum_wheeze = sum(wheeze),
+            # sum_weight.change = sum(weight.change),
+            # sum_nausea = sum(nausea),
+            # sum_chest.pain = sum(chest.pain),
+            # sum_palpitation = sum(palpitation),
+            # sum_exercise.intolerance = sum(exercise.intolerance),
+            # sum_dizziness = sum(dizziness)) %>% 
+  mutate(dyspnea = if_else(sum_dyspnea > 0, 1, 0)) %>%
+         # confusions = if_else(sum_confusions > 0, 1, 0),
+         # fatique = if_else(sum_fatique > 0, 1, 0),
+         # abdomen.distension = if_else(sum_abdomen.distension > 0, 1, 0),
+         # cough = if_else(sum_cough > 0, 1, 0),
+         # peripheral.edema = if_else(sum_peripheral.edema > 0, 1, 0), 
+         # anorexia = if_else(sum_anorexia > 0, 1, 0), 
+         # wheeze = if_else(sum_wheeze > 0, 1, 0), 
+         # weight.change = if_else(sum_weight.change > 0, 1, 0), 
+         # nausea = if_else(sum_nausea > 0, 1, 0), 
+         # chest.pain = if_else(sum_chest.pain > 0, 1, 0), 
+         # palpitation = if_else(sum_palpitation > 0, 1, 0),
+         # exercise.intolerance = if_else(sum_exercise.intolerance > 0, 1, 0),
+         # dizziness = if_else(sum_dizziness > 0, 1, 0)) %>% 
+  select(-starts_with("sum_"))
+```
+
+## 1. EXPLORATORY DATA ANALYSIS
+
+```{r word_count}
+# "mg", "patient" and "pain" are the most popular stop words
+data(stop_words)
+full_clinical_notes_data %>% 
+  unnest_tokens(output = word,
+                input = note_processed,
+                token = "words") %>% 
+  anti_join(stop_words, by = "word") %>% 
+  count(word, sort = TRUE)
+```
+
+```{r word_count_by_no_dyspnea}
+# "mg", "tablet" and "po" are top words for sentence without labels
+full_clinical_notes_data %>% 
+  filter(with_labels == 0) %>% 
+  unnest_tokens(output = word,
+                input = note_processed,
+                token = "words") %>% 
+  anti_join(stop_words) %>% 
+  count(word, sort = TRUE)
+```
+
+```{r word_count_by_dyspnea}
+# "breath", "pain" and "shortness" are top words among sentence with labels
+full_clinical_notes_data %>% 
+  filter(with_labels == 1) %>% 
+  unnest_tokens(output = word,
+                input = note_processed,
+                token = "words") %>% 
+  anti_join(stop_words) %>% 
+  count(word, sort = TRUE)
+```
+
+## 2. DEEP LEARNING MODELS - SENTENCE LEVEL - DYSPNEA ONLY (SINGLE-CLASS/SINGLE-LABEL CLASSIFICATION)
+
+```{r encoding_keras}
+# Prepare the data and labels
+texts <- full_clinical_notes_data %>% 
+  pull(note_processed)
+labels <- full_clinical_notes_data %>% 
+  pull(dyspnea)
+
+# Max length for each sentence is 10. 
+maxlen <- 20
+max_words <- 10000
+
+# Tokenize words
+tokenizer <- text_tokenizer(num_words = max_words) %>%
+ fit_text_tokenizer(texts)
+sequences <- texts_to_sequences(tokenizer, texts)
+word_index = tokenizer$word_index
+
+data <- pad_sequences(sequences, maxlen = maxlen)
+labels <- as.array(labels)
+```
+
+```{r train_test_split}
+set.seed(1174)
+training_and_validation_samples <- floor(nrow(full_clinical_notes_data)*0.75)
+test_samples <- nrow(full_clinical_notes_data) - training_and_validation_samples
+validation_samples <- floor(training_and_validation_samples*0.25)
+training_samples <- training_and_validation_samples - validation_samples
+
+indices <- sample(1:nrow(data))
+training_indices <- indices[1:training_samples]
+validation_indices <- indices[(training_samples + 1):(training_samples + validation_samples)]
+test_indices <- indices[(validation_samples + 1):(validation_samples + test_samples)]
+
+x_train <- data[training_indices,]
+y_train <- labels[training_indices]
+x_val <- data[validation_indices,]
+y_val <- labels[validation_indices]
+x_test <- data[test_indices,]
+y_test <- labels[test_indices]
+```
+
+```{r basic_nn_train_validate, warning = FALSE}
+model_basic_nn <- keras_model_sequential() %>%
+  layer_dense(units = 16, activation = "relu", input_shape = c(20)) %>%
+  layer_dropout(0.5) %>% 
+  layer_dense(units = 8, activation = "relu") %>%
+  layer_dropout(0.5) %>% 
+  layer_dense(units = 1, activation = "sigmoid")
+
+model_basic_nn %>% compile(
+ optimizer = "rmsprop",
+ loss = "binary_crossentropy",
+ metrics = c("accuracy")
+)
+
+model_basic_nn %>% fit(
+ x_train,
+ y_train,
+ epochs = 20,
+ batch_size = 64,
+ validation_data = list(x_val, y_val)
+)
+```
+
+<!-- # ```{r basic_nn_kfold} -->
+<!-- # # Features and Labels -->
+<!-- # texts <- full_clinical_notes_data %>%  -->
+<!-- #   pull(note_processed) -->
+<!-- # labels <- full_clinical_notes_data %>%  -->
+<!-- #   pull(dyspnea) -->
+<!-- #  -->
+<!-- # maxlen <- 20 -->
+<!-- # max_words <- 10000 -->
+<!-- #  -->
+<!-- # training_samples <- floor(nrow(full_clinical_notes_data)*0.75) -->
+<!-- # test_samples <- nrow(full_clinical_notes_data) - training_samples -->
+<!-- #  -->
+<!-- # tokenizer <- text_tokenizer(num_words = max_words) %>% -->
+<!-- #  fit_text_tokenizer(texts) -->
+<!-- # sequences <- texts_to_sequences(tokenizer, texts) -->
+<!-- # word_index = tokenizer$word_index -->
+<!-- # data <- pad_sequences(sequences, maxlen = maxlen) -->
+<!-- # labels <- as.array(labels) -->
+<!-- #  -->
+<!-- # indices <- sample(1:nrow(data)) -->
+<!-- # training_indices <- indices[1:training_samples] -->
+<!-- # test_indices <- indices[(training_samples + 1):(training_samples + test_samples)] -->
+<!-- #  -->
+<!-- # train_data <- data[training_indices,] -->
+<!-- # train_targets <- labels[training_indices] -->
+<!-- # test_data <- data[test_indices,] -->
+<!-- # test_targets <- labels[test_indices] -->
+<!-- #  -->
+<!-- # k <- 4 -->
+<!-- # folds <- cut(training_indices, breaks = k, labels = FALSE) -->
+<!-- #  -->
+<!-- # num_epochs <- 5 -->
+<!-- # all_scores <- c() -->
+<!-- # all_accuracy <- c() -->
+<!-- # 3 -->
+<!-- # build_model <- function() { -->
+<!-- #    -->
+<!-- #   model <- keras_model_sequential() %>% -->
+<!-- #     layer_dense(units = 16, activation = "relu", input_shape = c(20)) %>% -->
+<!-- #     layer_dense(units = 16, activation = "relu") %>% -->
+<!-- #     layer_dense(units = 1, activation = "sigmoid") -->
+<!-- #    -->
+<!-- #   model %>% compile( -->
+<!-- #     optimizer = "rmsprop", -->
+<!-- #     loss = "binary_crossentropy", -->
+<!-- #     metrics = c("acc") -->
+<!-- #     ) -->
+<!-- # } -->
+<!-- #  -->
+<!-- # for (i in 1:k) { -->
+<!-- #   cat("processing fold #", i, "\n") -->
+<!-- #    -->
+<!-- #   val_indices <- which(folds == i, arr.ind = TRUE) -->
+<!-- #   val_data <- train_data[val_indices,] -->
+<!-- #   val_targets <- train_targets[val_indices] -->
+<!-- #    -->
+<!-- #   partial_train_data <- train_data[-val_indices,] -->
+<!-- #   partial_train_targets <- train_targets[-val_indices] -->
+<!-- #   model <- build_model()  -->
+<!-- #    -->
+<!-- #   model %>%  -->
+<!-- #     fit(partial_train_data,  -->
+<!-- #         partial_train_targets, -->
+<!-- #         epochs = num_epochs,  -->
+<!-- #         batch_size = 1) -->
+<!-- #    -->
+<!-- #   results <- model %>%  -->
+<!-- #     evaluate(val_data, val_targets) -->
+<!-- #    -->
+<!-- #   all_scores <- c(all_scores, results$loss) -->
+<!-- #   all_accuracy <- c(all_accuracy, results$acc) -->
+<!-- # } -->
+<!-- # ``` -->
+
+```{r basic_nn_test_accuracy}
+# Refit after 6 epochs
+model_basic_nn %>% fit(
+ x_train,
+ y_train,
+ epochs = 6,
+ batch_size = 64,
+ validation_data = list(x_val, y_val)
+)
+
+# Accuracy of ~71%; Loss of 3.5
+results <- model_basic_nn %>%
+ evaluate(x_test, y_test)
+```
+
+<!-- ### 2A. GLOVE WORD EMBEDDINGS -->
+
+<!-- ```{r loading_glove_embeddings_weights} -->
+<!-- glove_dir = "/Users/nguyenh/Desktop/cumc/tensorflow_project/glove.6B" -->
+<!-- lines <- readLines(file.path(glove_dir, "glove.6B.100d.txt")) -->
+<!-- embeddings_index <- new.env(hash = TRUE, parent = emptyenv()) -->
+
+<!-- for (i in 1:length(lines)) { -->
+<!--  line <- lines[[i]] -->
+<!--  values <- strsplit(line, " ")[[1]] -->
+<!--  word <- values[[1]] -->
+<!--  embeddings_index[[word]] <- as.double(values[-1]) -->
+<!-- } -->
+<!-- cat("Found", length(embeddings_index), "word vectors.\n") -->
+
+<!-- max_words <- 10000 -->
+<!-- embedding_dim <- 100 -->
+<!-- embedding_matrix <- array(0, c(max_words, embedding_dim)) -->
+
+<!-- for (word in names(word_index)) { -->
+<!--   index <- word_index[[word]] -->
+<!--   if (index < max_words) { -->
+<!--     embedding_vector <- embeddings_index[[word]] -->
+<!--     if (!is.null(embedding_vector)) -->
+<!--       embedding_matrix[index+1,] <- embedding_vector -->
+<!--  } -->
+<!-- } -->
+<!-- ``` -->
+
+<!-- ```{r glove_embedding_model_definition, warning = FALSE} -->
+<!-- model_glove_embedding <- keras_model_sequential() %>% -->
+<!--   layer_embedding(input_dim = max_words,  -->
+<!--                   output_dim = embedding_dim, -->
+<!--                   input_length = maxlen, -->
+<!--                   name = "embedding") %>% -->
+<!--   layer_flatten() %>% -->
+<!--   layer_dropout(0.5) %>%  -->
+<!--   layer_dense(units = 32, activation = "relu") %>% -->
+<!--   layer_dropout(0.5) %>%  -->
+<!--   layer_dense(units = 16, activation = "relu") %>% -->
+<!--   layer_dense(units = 1, activation = "sigmoid") -->
+
+<!-- get_layer(model_glove_embedding, name = "embedding") %>% -->
+<!--  set_weights(list(embedding_matrix)) %>% -->
+<!--  freeze_weights() -->
+<!-- ``` -->
+
+<!-- ```{r glove_embedding_training_and_validation} -->
+<!-- model_glove_embedding %>% compile( -->
+<!--  optimizer = "rmsprop", -->
+<!--  loss = "binary_crossentropy", -->
+<!--  metrics = c("acc") -->
+<!-- ) -->
+
+<!-- history <- model_glove_embedding %>% fit( -->
+<!--  x_train, y_train, -->
+<!--  epochs = 10, -->
+<!--  batch_size = 64, -->
+<!--  validation_data = list(x_val, y_val) -->
+<!-- ) -->
+
+<!-- ``` -->
+
+<!-- ```{r glove_embedding_test_accuracy} -->
+<!-- # Test accuracy around 94% -->
+<!-- model_glove_embedding %>% -->
+<!--  evaluate(x_test, y_test) -->
+<!-- ``` -->
+
+<!-- ```{r without_glove_embedding_model_definition} -->
+<!-- model_withoutglove_embedding <- keras_model_sequential() %>% -->
+<!--   layer_embedding(input_dim = max_words,  -->
+<!--                   output_dim = embedding_dim, -->
+<!--                   input_length = maxlen) %>% -->
+<!--   layer_flatten() %>% -->
+<!--   layer_dense(units = 32,  -->
+<!--               activation = "relu", -->
+<!--               kernel_regularizer = regularizer_l2(0.001)) %>% -->
+<!--   layer_dense(units = 16,  -->
+<!--               activation = "relu", -->
+<!--               kernel_regularizer = regularizer_l2(0.001)) %>% -->
+<!--   layer_dense(units = 1, activation = "sigmoid") -->
+
+<!-- model_withoutglove_embedding %>% compile( -->
+<!--  optimizer = "rmsprop", -->
+<!--  loss = "binary_crossentropy", -->
+<!--  metrics = c("acc") -->
+<!-- ) -->
+
+<!-- model_withoutglove_embedding %>% fit( -->
+<!--  x_train, y_train, -->
+<!--  epochs = 10, -->
+<!--  batch_size = 64, -->
+<!--  validation_data = list(x_val, y_val) -->
+<!-- ) -->
+<!-- ``` -->
+
+<!-- ```{r without_glove_embedding_test_accuracy} -->
+<!-- # Test accuracy of 99.9% -->
+<!-- model_withoutglove_embedding %>% -->
+<!--  evaluate(x_test, y_test) -->
+<!-- ``` -->
+
+<!-- ```{r without_glove_embedding_prediction} -->
+<!-- model_withoutglove_embedding %>%  -->
+<!--   predict_classes(x_test) -->
+<!-- ``` -->
+
+### 2B. RECURRENT NEURAL NETWORKS
+
+```{r simple_rnn_train_validate}
+maxlen <- 20
+max_features  <- 10000
+
+model_rnn <- keras_model_sequential() %>%
+  layer_embedding(input_dim = max_features, 
+                  output_dim = 32) %>%
+  layer_simple_rnn(units = 32) %>%
+  layer_dropout(0.2) %>% 
+  layer_dense(units = 16, 
+              activation = "relu",
+              kernel_regularizer = regularizer_l2(0.001)) %>% 
+  layer_dropout(0.2) %>% 
+  layer_dense(units = 1, activation = "sigmoid")
+
+model_rnn %>% compile(
+  optimizer = "rmsprop",
+  loss = "binary_crossentropy",
+  metrics = c("acc")
+)
+
+model_rnn %>% fit(
+ x_train, y_train,
+ epochs = 10,
+ batch_size = 64,
+ validation_data = list(x_val, y_val)
+)
+```
+
+```{r simple_rnn_test}
+# Accuracy 99.5%; Loss 0.03
+model_rnn %>%
+ evaluate(x_test, y_test)
+```
+
+### 2C. LSTM
+
+```{r lstm}
+maxlen <- 20
+max_features  <- 10000
+
+model_lstm <- keras_model_sequential() %>%
+  layer_embedding(input_dim = max_features, 
+                  output_dim = 32) %>%
+  layer_lstm(units = 32) %>%
+  layer_dense(units = 16, 
+              activation = "relu",
+              kernel_regularizer = regularizer_l2(0.01)) %>% 
+  layer_dropout(0.2) %>% 
+  layer_dense(units = 1, activation = "sigmoid")
+
+model_lstm %>% compile(
+ optimizer = "rmsprop",
+ loss = "binary_crossentropy",
+ metrics = c("acc")
+)
+
+history <- model_lstm %>% fit(
+ x_train, y_train,
+ epochs = 10,
+ batch_size = 64,
+ validation_data = list(x_val, y_val)
+)
+```
+
+```{r lstm_test}
+# Accuracy 96.8%; Loss 0.10
+model_lstm %>%
+ evaluate(x_test, y_test)
+```
+
+### 2D. LSTM - MORE LAYERS
+
+```{r lstm_more_layers_train_validate}
+maxlen <- 20
+max_words <- 10000
+embedding_dim <- 100
+embedding_matrix <- array(0, c(max_words, embedding_dim))
+
+input <- layer_input(
+  shape = list(NULL),
+  dtype = "int32",
+  name = "input"
+)
+
+encoded <- input %>% 
+  layer_embedding(input_dim = max_words, 
+                  output_dim = embedding_dim, 
+                  input_length = maxlen,
+                  name = "embedding_1") %>% 
+  layer_lstm(units = maxlen,
+             dropout = 0.2,
+             recurrent_dropout = 0.5,
+             return_sequences = FALSE) 
+
+dense <- encoded %>% 
+  layer_dropout(rate = 0.5) %>% 
+  layer_dense(units = 32, activation = "relu") %>% 
+  layer_dropout(rate = 0.5) %>% 
+  layer_dense(units = 1, activation = "sigmoid")
+
+model_lstm_more_layer <- keras_model(input, dense)
+
+get_layer(model_lstm_more_layer, name = "embedding_1") %>%
+ set_weights(list(embedding_matrix)) %>%
+ freeze_weights()
+
+model_lstm_more_layer %>% compile(
+  optimizer = optimizer_rmsprop(lr = 0.001),
+  loss = "binary_crossentropy",
+  metrics = c("acc")
+)
+
+model_lstm_more_layer %>% fit(
+ x_train, y_train,
+ epochs = 10,
+ batch_size = 64,
+ validation_data = list(x_val, y_val)
+)
+```
+
+```{r lstm_more_layers_test}
+# Accuracy 71%; Loss 0.628
+model_lstm_more_layer %>%
+ evaluate(x_test, y_test)
+```
+
+### 2E. BIRECTIONAL RNN
+
+```{r bidirectional_train_and_evaluate}
+model_bidirectional <- keras_model_sequential() %>%
+  layer_embedding(input_dim = max_features, 
+                  output_dim = 32) %>%
+  bidirectional(
+    layer_lstm(units = 32)
+    )  %>%
+  layer_dense(units = 16, 
+              activation = "relu",
+              kernel_regularizer = regularizer_l2(0.001)) %>%
+  layer_dropout(rate = 0.5) %>% 
+  layer_dense(units = 1, activation = "sigmoid")
+
+model_bidirectional %>% compile(
+ optimizer = "rmsprop",
+ loss = "binary_crossentropy",
+ metrics = c("acc")
+)
+
+history <- model_bidirectional %>% fit(
+ x_train, y_train,
+ epochs = 10,
+ batch_size = 64,
+ validation_data = list(x_val, y_val)
+)
+```
+
+```{r bidirectional_test}
+model_bidirectional %>%
+ evaluate(x_test, y_test)
+```
+
+### 2F. 1D-COVNET
+
+```{r 1d_covnet_train_evaluate}
+max_len <- 20
+max_features  <- 10000
+
+model_covnet <- keras_model_sequential() %>%
+  layer_embedding(input_dim = max_features, 
+                  output_dim = 128,
+                  input_length = max_len) %>%
+  layer_conv_1d(filters = 32, 
+                kernel_size = 3, 
+                activation = "relu") %>%
+  layer_max_pooling_1d(pool_size = 5) %>%
+  layer_conv_1d(filters = 32, 
+                kernel_size = 3, 
+                activation = "relu") %>%
+  layer_global_max_pooling_1d() %>%
+  layer_dropout(0.5) %>% 
+  layer_dense(units = 1)
+
+model_covnet %>% compile(
+ optimizer = optimizer_rmsprop(lr = 1e-4),
+ loss = "binary_crossentropy",
+ metrics = c("acc")
+)
+history <- model_covnet %>% fit(
+ x_train, y_train,
+ epochs = 10,
+ batch_size = 64,
+ validation_data = list(x_val, y_val)
+)
+```
+
+```{r 1d_covnet_test}
+model_covnet %>%
+ evaluate(x_test, y_test)
+```
+
+## 3. CLINICAL NOTE LEVEL
+
+```{r preparing_clinical_notes}
+full_clinical_notes_with_labels <- full_clinical_notes_data %>% 
+  group_by(report_no) %>% 
+  summarize(note_processed_all = paste(note_processed, collapse = " ")) %>% 
+  merge(full_report_label, by = c("report_no"))
+```
+
+```{r encoding_full_notes}
+
+texts <- full_clinical_notes_with_labels %>% 
+  pull(note_processed_all)
+
+labels <- full_clinical_notes_with_labels %>% 
+  pull(dyspnea)
+
+maxlen <- 100
+max_words <- 10000
+
+tokenizer <- text_tokenizer(num_words = max_words) %>%
+ fit_text_tokenizer(texts)
+sequences <- texts_to_sequences(tokenizer, texts)
+word_index = tokenizer$word_index
+
+data <- pad_sequences(sequences, maxlen = maxlen)
+labels <- as.array(labels)
+```
+
+```{r train_test_split_full_note}
+indices <- sample(1:nrow(data))
+
+training_and_validation_samples <- floor(nrow(full_clinical_notes_with_labels)*0.75)
+test_samples <- nrow(full_clinical_notes_with_labels) - training_and_validation_samples
+validation_samples <- floor(training_and_validation_samples*0.25)
+training_samples <- training_and_validation_samples - validation_samples
+
+training_indices <- indices[1:training_samples]
+validation_indices <- indices[(training_samples + 1):(training_samples + validation_samples)]
+test_indices <- indices[(validation_samples + 1):(validation_samples + test_samples)]
+
+x_train <- data[training_indices,]
+y_train <- labels[training_indices]
+x_val <- data[validation_indices,]
+y_val <- labels[validation_indices]
+x_test <- data[test_indices,]
+y_test <- labels[test_indices]
+```
+
+<!-- ### 3A. GLOVE -->
+
+<!-- ```{r model_definition_full_note_glove_embedding} -->
+<!-- model_full_note_glove_embedding <- keras_model_sequential() %>% -->
+<!--   layer_embedding(input_dim = max_words,  -->
+<!--                   output_dim = embedding_dim, -->
+<!--                   input_length = maxlen) %>% -->
+<!--   layer_flatten() %>% -->
+<!--   layer_dense(units = 32,  -->
+<!--               activation = "relu", -->
+<!--               kernel_regularizer = regularizer_l2(0.001)) %>% -->
+<!--   layer_dropout(0.5) %>%  -->
+<!--   layer_dense(units = 32,  -->
+<!--               activation = "relu", -->
+<!--               kernel_regularizer = regularizer_l2(0.001)) %>% -->
+<!--   layer_dropout(0.5) %>%  -->
+<!--   layer_dense(units = 16,  -->
+<!--               activation = "relu", -->
+<!--               kernel_regularizer = regularizer_l2(0.001)) %>% -->
+<!--   layer_dropout(0.5) %>% -->
+<!--   layer_dense(units = 1, activation = "sigmoid") -->
+
+<!-- get_layer(model_full_note_glove_embedding, index = 1) %>% -->
+<!--  set_weights(list(embedding_matrix)) %>% -->
+<!--  freeze_weights() -->
+<!-- ``` -->
+
+<!-- ```{r training_and_validation_full_note_glove_glove_embedding} -->
+<!-- model_full_note_glove_embedding %>% compile( -->
+<!--  optimizer = "rmsprop", -->
+<!--  loss = "binary_crossentropy", -->
+<!--  metrics = c("acc") -->
+<!-- ) -->
+
+<!-- history <- model_full_note_glove_embedding %>% fit( -->
+<!--  x_train, y_train, -->
+<!--  epochs = 30, -->
+<!--  batch_size = 64, -->
+<!--  validation_data = list(x_val, y_val) -->
+<!-- ) -->
+<!-- ``` -->
+
+<!-- ```{r test_full_note_glove} -->
+<!-- model_full_note_glove_embedding %>% -->
+<!--  evaluate(x_test, y_test) -->
+<!-- ``` -->
+
+### 3B. RECURRENT NEURAL NETWORKS
+
+```{r simple_rnn_full_note}
+maxlen <- 100
+max_features  <- 10000
+
+model_rnn_full_note <- keras_model_sequential() %>%
+  layer_embedding(input_dim = max_features, 
+                  output_dim = embedding_dim,
+                  input_length = maxlen,
+                  name = "embedding") %>%
+  layer_simple_rnn(units = 32, return_sequences = TRUE) %>%
+  layer_simple_rnn(units = 32) %>%
+  layer_dense(units = 32, 
+              activation = "relu",
+              kernel_regularizer = regularizer_l2(0.01)) %>% 
+  layer_dropout(0.2) %>% 
+  layer_dense(units = 16, 
+              activation = "relu",
+              kernel_regularizer = regularizer_l2(0.01)) %>% 
+  layer_dropout(0.2) %>%
+  layer_dense(units = 8, 
+              activation = "relu",
+              kernel_regularizer = regularizer_l2(0.01)) %>%
+  layer_dropout(0.2) %>%
+  layer_dense(units = 1, activation = "sigmoid")
+
+get_layer(model_rnn_full_note, name = "embedding") %>%
+ set_weights(list(embedding_matrix)) %>%
+ freeze_weights()
+
+model_rnn_full_note %>% compile(
+ optimizer = "rmsprop",
+ loss = "binary_crossentropy",
+ metrics = c("acc")
+)
+
+model_rnn_full_note %>% fit(
+ x_train, y_train,
+ epochs = 20,
+ batch_size = 128,
+ validation_data = list(x_val, y_val)
+)
+```
+
+```{r simple_rnn_test_full_note}
+# Accuracy 75.8%; Loss 1.08
+model_rnn_full_note %>%
+ evaluate(x_test, y_test)
+```
+
+### 3C. LSTM
+
+```{r lstm_full_note}
+maxlen <- 100
+max_features  <- 10000
+
+model_lstm_full_note <- keras_model_sequential() %>%
+  layer_embedding(input_dim = max_features, 
+                  output_dim = 32) %>%
+  layer_lstm(units = 32) %>%
+  layer_dropout(0.2) %>% 
+  layer_dense(units = 16, activation = "relu") %>% 
+  layer_dropout(0.2) %>% 
+  layer_dense(units = 1, activation = "sigmoid")
+
+model_lstm_full_note %>% compile(
+ optimizer = "rmsprop",
+ loss = "binary_crossentropy",
+ metrics = c("acc")
+)
+
+history <- model_lstm_full_note %>% fit(
+ x_train, y_train,
+ epochs = 10,
+ batch_size = 64,
+ validation_data = list(x_val, y_val)
+)
+```
+
+```{r lstm_test_full_note}
+# Accuracy 77.4%; Loss 0.26
+model_lstm_full_note %>%
+ evaluate(x_test, y_test)
+```
+
+<!-- ## 4. MULTILABEL PREDICTIONS - SENTENCE LEVEL -->
+
+<!-- ```{r multilabel_data_building} -->
+<!-- texts <- full_clinical_notes_data %>%  -->
+<!--   pull(note_processed) -->
+
+<!-- labels <- full_clinical_notes_data %>%  -->
+<!--   select(-c(note_processed, report_no, with_labels)) %>%  -->
+<!--   as.matrix() -->
+
+<!-- maxlen <- 20 -->
+<!-- max_words <- 10000 -->
+
+<!-- training_and_validation_samples <- floor(nrow(clinical_notes_data)*0.75) -->
+<!-- test_samples <- nrow(clinical_notes_data) - training_and_validation_samples -->
+<!-- validation_samples <- floor(training_and_validation_samples*0.25) -->
+<!-- training_samples <- training_and_validation_samples - validation_samples -->
+
+<!-- tokenizer <- text_tokenizer(num_words = max_words) %>% -->
+<!--  fit_text_tokenizer(texts) -->
+<!-- sequences <- texts_to_sequences(tokenizer, texts) -->
+<!-- word_index = tokenizer$word_index -->
+
+<!-- data <- pad_sequences(sequences, maxlen = maxlen) -->
+<!-- labels <- as.array(labels) -->
+
+<!-- set.seed(1174) -->
+<!-- indices <- sample(1:nrow(data)) -->
+<!-- training_indices <- indices[1:training_samples] -->
+<!-- validation_indices <- indices[(training_samples + 1):(training_samples + validation_samples)] -->
+<!-- test_indices <- indices[(validation_samples + 1):(validation_samples + test_samples)] -->
+
+<!-- x_train <- data[training_indices,] -->
+<!-- y_train <- labels[training_indices,] -->
+<!-- x_val <- data[validation_indices,] -->
+<!-- y_val <- labels[validation_indices,] -->
+<!-- x_test <- data[test_indices,] -->
+<!-- y_test <- labels[test_indices,] -->
+<!-- ``` -->
+
+<!-- ```{r basic_nn_multilabel, warning = FALSE} -->
+<!-- model_nn_multilabel <- keras_model_sequential() %>% -->
+<!--   layer_dense(units = 32, activation = "relu", input_shape = c(20)) %>% -->
+<!--   layer_dropout(0.5) %>%  -->
+<!--   layer_dense(units = 16, activation = "relu") %>% -->
+<!--   layer_dropout(0.5) %>%  -->
+<!--   layer_dense(units = 14, activation = "sigmoid") -->
+
+<!-- model_nn_multilabel %>% compile( -->
+<!--  optimizer = "rmsprop", -->
+<!--  loss = "binary_crossentropy", -->
+<!--  metrics = c("accuracy") -->
+<!-- ) -->
+
+<!-- model_nn_multilabel %>% fit( -->
+<!--  x_train, -->
+<!--  y_train, -->
+<!--  epochs = 20, -->
+<!--  batch_size = 64, -->
+<!--  validation_data = list(x_val, y_val) -->
+<!-- ) -->
+<!-- ``` -->
+
+<!-- ```{r basic_nn_multilabel_test, warning = FALSE} -->
+<!-- model_nn_multilabel %>% -->
+<!--  evaluate(x_test, y_test) -->
+<!-- ``` -->
+
+<!-- ```{r basic_nn_multilabel_prediction} -->
+<!-- # Predict only 0. -->
+<!-- model_nn_multilabel %>%  -->
+<!--   predict_classes(x_test) %>%  -->
+<!--   unique() -->
+<!-- ``` -->
+
+<!-- ### 4A. GLOVE -->
+
+<!-- ```{r model_definition_glove_multilabel, warning = FALSE} -->
+<!-- embedding_dim <- 100 -->
+<!-- model_embedding_glove_multilabel <- keras_model_sequential() %>% -->
+<!--   layer_embedding(input_dim = max_words,  -->
+<!--                   output_dim = embedding_dim, -->
+<!--                   input_length = maxlen) %>% -->
+<!--   layer_flatten() %>% -->
+<!--   layer_dropout(0.5) %>%  -->
+<!--   layer_dense(units = 32, activation = "relu") %>% -->
+<!--   layer_dropout(0.5) %>%  -->
+<!--   layer_dense(units = 14, activation = "sigmoid") -->
+
+<!-- get_layer(model_embedding_glove_multilabel, index = 1) %>% -->
+<!--  set_weights(list(embedding_matrix)) %>% -->
+<!--  freeze_weights() -->
+<!-- ``` -->
+
+<!-- ```{r training_and_validation_glove_multilabel} -->
+<!-- model_embedding_glove_multilabel %>% compile( -->
+<!--  optimizer = "rmsprop", -->
+<!--  loss = "binary_crossentropy", -->
+<!--  metrics = c("acc") -->
+<!-- ) -->
+<!-- history <- model_embedding_glove_multilabel %>% fit( -->
+<!--  x_train, y_train, -->
+<!--  epochs = 10, -->
+<!--  batch_size = 64, -->
+<!--  validation_data = list(x_val, y_val) -->
+<!-- ) -->
+<!-- ``` -->
+
+<!-- ```{r test_accuracy_glove_multilabel} -->
+<!-- model_embedding_glove_multilabel %>% -->
+<!--  evaluate(x_test, y_test) -->
+
+<!-- # Predict only 0, 1, 2 -->
+<!-- model_embedding_glove_multilabel %>%  -->
+<!--   predict_classes(x_test) %>%  -->
+<!--   unique() -->
+<!-- ``` -->
+
+<!-- ```{r without_glove_multilabel} -->
+<!-- model_embedding_withoutglove_multilabel <- keras_model_sequential() %>% -->
+<!--   layer_embedding(input_dim = max_words,  -->
+<!--                   output_dim = embedding_dim, -->
+<!--                   input_length = maxlen) %>% -->
+<!--   layer_flatten() %>% -->
+<!--   layer_dropout(0.5) %>%  -->
+<!--   layer_dense(units = 32, activation = "relu") %>% -->
+<!--   layer_dropout(0.5) %>% -->
+<!--   layer_dense(units = 14, activation = "sigmoid") -->
+
+<!-- model_embedding_withoutglove_multilabel %>% compile( -->
+<!--  optimizer = "rmsprop", -->
+<!--  loss = "binary_crossentropy", -->
+<!--  metrics = c("acc") -->
+<!-- ) -->
+
+<!-- model_embedding_withoutglove_multilabel %>% fit( -->
+<!--  x_train, y_train, -->
+<!--  epochs = 10, -->
+<!--  batch_size = 64, -->
+<!--  validation_data = list(x_val, y_val) -->
+<!-- ) -->
+<!-- ``` -->
+
+<!-- ```{r test_accuracy_without_glove_multilabel} -->
+<!-- model_embedding_withoutglove_multilabel %>% -->
+<!--  evaluate(x_test, y_test) -->
+
+<!-- model_embedding_withoutglove_multilabel %>%  -->
+<!--   predict_classes(x_test) %>%  -->
+<!--   unique() -->
+<!-- ``` -->
+
+<!-- ### 4B. RECURRENT NEURAL NETWORKS -->
+
+<!-- ```{r simple_rnn_train_validate_multilabel} -->
+<!-- maxlen <- 20 -->
+<!-- max_features  <- 10000 -->
+
+<!-- model_rnn_multilabel <- keras_model_sequential() %>% -->
+<!--   layer_embedding(input_dim = max_features,  -->
+<!--                   output_dim = 32) %>% -->
+<!--   layer_simple_rnn(units = 32, -->
+<!--                    dropout = 0.2, -->
+<!--                    return_sequences = TRUE) %>% -->
+<!--   layer_simple_rnn(units = 32, -->
+<!--                    dropout = 0.2) %>%  -->
+<!--   layer_dense(units = 16,  -->
+<!--               activation = "relu") %>%  -->
+<!--   layer_dropout(0.5) %>%  -->
+<!--   layer_dense(units = 14, activation = "sigmoid") -->
+
+<!-- model_rnn_multilabel %>% compile( -->
+<!--   optimizer = "rmsprop", -->
+<!--   loss = "binary_crossentropy", -->
+<!--   metrics = c("acc") -->
+<!-- ) -->
+
+<!-- model_rnn_multilabel %>% fit( -->
+<!--  x_train, y_train, -->
+<!--  epochs = 10, -->
+<!--  batch_size = 64, -->
+<!--  validation_data = list(x_val, y_val) -->
+<!-- ) -->
+<!-- ``` -->
+
+<!-- ```{r simple_rnn_test_multilabel} -->
+<!-- model_rnn_multilabel %>% -->
+<!--  evaluate(x_test, y_test) -->
+
+<!-- model_rnn_multilabel %>% -->
+<!--  predict_classes(x_test) %>%  -->
+<!--   unique() -->
+<!-- ``` -->
+
+

@@ -1,0 +1,1181 @@
+---
+title: "SVM (Dyspnea)"
+author: "Alyssa Vanderbeek"
+date: "8/13/2019"
+output: pdf_document
+params:
+  data_folder: "~/Desktop/DSI_NimbleMiner/NimbleMiner_ML/Chunks/data/"
+---
+
+```{r loading_packages, , echo = FALSE, message = FALSE, warning = FALSE, results = 'hide'}
+pkg <- c("devtools"
+        ,"pander"
+        ,"knitr"
+        ,"dplyr"
+        ,"tidyr"
+        ,"stringr"
+        ,"lubridate"
+        ,"purrr"
+        ,"DT"
+        ,"tidytext"
+        ,"ggplot2"
+        ,"textstem"
+        ,"tm"
+        ,"splitstackshape"
+        ,"text2vec"
+        ,"reshape"
+        ,"readr"
+        ,"zoo"
+        ,"keras"
+        ,"RTextTools"
+        ,"e1071"
+        ,"caret")
+invisible(lapply(pkg, library, character.only = TRUE))
+options(warn = 0)
+```
+
+```{r create_matrixfn, echo=FALSE}
+###############################################################################################
+# Function create_matrix - runtime fix small error of create_matrix from RTextTools package
+###############################################################################################
+create_matrix <- function(textColumns, language = "english", minDocFreq = 1,
+                          maxDocFreq = Inf, minWordLength = 3, maxWordLength = Inf,
+                          ngramLength = 1, originalMatrix = NULL, removeNumbers = FALSE,
+                          removePunctuation = TRUE, removeSparseTerms = 0, removeStopwords = TRUE,
+                          stemWords = FALSE, stripWhitespace = TRUE, toLower = TRUE,
+                          weighting = weightTf)
+{
+  
+  stem_words <- function(x) {
+    split <- strsplit(x, " ")
+    return(wordStem(unlist(split), language = language))
+  }
+  
+  tokenize_ngrams <- function(x, n = ngramLength) return(rownames(as.data.frame(unclass(textcnt(x, method = "string", n = n)))))
+  
+  control <- list(bounds = list(local = c(minDocFreq, maxDocFreq)),
+                  language = language, tolower = toLower, removeNumbers = removeNumbers,
+                  removePunctuation = removePunctuation, stopwords = removeStopwords,
+                  stripWhitespace = stripWhitespace, wordLengths = c(minWordLength,
+                                                                     maxWordLength), weighting = weighting)
+  if (ngramLength > 1) {
+    control <- append(control, list(tokenize = tokenize_ngrams),
+                      after = 7)
+  }
+  else {
+    control <- append(control, list(tokenize = scan_tokenizer),
+                      after = 4)
+  }
+  if (stemWords == TRUE && ngramLength == 1)
+    control <- append(control, list(stemming = stem_words),
+                      after = 7)
+  trainingColumn <- apply(as.matrix(textColumns), 1, paste,
+                          collapse = " ")
+  trainingColumn <- sapply(as.vector(trainingColumn, mode = "character"),
+                           iconv, to = "UTF8", sub = "byte")
+  
+  
+  corpus <- tm::VCorpus(VectorSource(trainingColumn),readerControl = list(language = language))
+  library(stopwords)
+  corpus <- tm::tm_map(corpus, removeWords, stopwords("English"))
+  #corpus <- tm_map(corpus, removeWords, stopwords::stopwords("he", source = "stopwords-iso"))
+  matrix <- tm::DocumentTermMatrix(corpus, control = control)
+  
+  if (removeSparseTerms > 0)
+    matrix <- tm::removeSparseTerms(matrix, removeSparseTerms)
+  if (!is.null(originalMatrix)) {
+    terms <- colnames(originalMatrix[, which(!colnames(originalMatrix) %in%
+                                               colnames(matrix))])
+    
+    weight <- 0
+    if (attr(weighting, "acronym") == "tf-idf")
+      weight <- 1e-09
+    amat <- matrix(weight, nrow = nrow(matrix), ncol = length(terms))
+    colnames(amat) <- terms
+    rownames(amat) <- rownames(matrix)
+    fixed <- as.DocumentTermMatrix(cbind(matrix[, which(colnames(matrix) %in%
+                                                          colnames(originalMatrix))], amat), weighting = weighting)
+    matrix <- fixed
+  }
+  matrix <- matrix[, sort(colnames(matrix))]
+  gc()
+  return(matrix)
+}
+
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+chunk_size = 1
+category = "Dyspnea"
+```
+
+
+### Sentence-level prediction
+
+```{r loading_data, message = FALSE, warning = FALSE, results = 'hide'}
+
+# LOADING ORIGINAL DATASET (GOLD STANDARD)
+file_name <- file.path(params$data_folder, 'gold_standard_HF_100_pt_AV.csv')
+
+clinical_notes_raw_data <- file_name %>% 
+  readr::read_csv() %>% 
+  # X1 is the index column, unselect this column
+  select(-X1) %>% 
+  # report_head indicates the start of a note
+  mutate(report_head = str_detect(Note, "^admission date"))
+
+# report_head contains the column report_no, a unique identifier for each report
+# the report_head dataframe contain report_no, a unique indentifier for each report
+report_head <- clinical_notes_raw_data %>% 
+  filter(report_head) %>% 
+  select(Note, report_head) %>% 
+  mutate(report_no = row_number()) %>% 
+  select(-report_head)
+
+clinical_notes_data <- clinical_notes_raw_data %>% 
+  # joint with report_head dataframe, report_no show which report each sentence belongs to
+  left_join(report_head, by = c("Note")) %>% 
+  mutate(report_no = na.locf(report_no),
+         # remove all numbers
+         Note = removeNumbers(Note)) %>% 
+  # remove lines with no sentences
+  filter(Note != "") %>% 
+  tidyr::unite(Categories, contains("category")) %>%
+  select(-contains("copy")) %>%
+  # remove unnecessary whitespaces
+  mutate(note_processed = str_squish(Note)) %>% 
+  transmute(note_processed,
+            report_head,
+            report_no,
+            Categories) %>%
+  filter(!report_head) %>% 
+  # Create 14 label columns (one-hot encoding)
+  mutate(dyspnea = as.numeric(grepl("Dyspnea", Categories)),
+         confusions = as.numeric(grepl("Confusion", Categories)),
+         fatique = as.numeric(grepl("Fatigue", Categories)),
+         abdomen.distension = as.numeric(grepl("abdomen.distension", Categories)),
+         cough = as.numeric(grepl("Cough", Categories)),
+         peripheral.edema = as.numeric(grepl("peripheral.edema", Categories)),
+         anorexia = as.numeric(grepl("Anorexia", Categories)),
+         wheeze = as.numeric(grepl("Wheeze", Categories)),
+         weight.change = as.numeric(grepl("Weight.loss.or.weight.gain", Categories)),
+         nausea = as.numeric(grepl("Nausea", Categories)),
+         chest.pain = as.numeric(grepl("Chest.pain", Categories)),
+         palpitation = as.numeric(grepl("Palpitation", Categories)),
+         exercise.intolerance = as.numeric(grepl("Exercise.intolerance", Categories)),
+         dizziness = as.numeric(grepl("Dizziness", Categories))) %>% 
+  # replace NA with 0
+  replace(is.na(.), 0) %>% 
+  select(-c(Categories, report_head))
+
+no_original_report <- clinical_notes_data %>% 
+  pull(report_no) %>% 
+  max()
+```
+
+```{r loading_additional_data, message = FALSE, warning = FALSE, results = 'hide'}
+
+# LABELED SENTENCES BY SIMCLINS
+# Same logic for processing dataset as above. Import labeled data - labeled by NimbleMiner for Dyspnea
+
+labeled_training_notes_file <- file.path(params$data_folder, 'training_notes_NMlabeled_chunk1.csv')
+
+additional_data <- labeled_training_notes_file %>%
+  readr::read_csv() %>%
+  select(-X1) %>%
+  mutate(Note = tolower(Note)) %>%
+  mutate(report_head = str_detect(Note, "^admission date"))
+
+additional_report_head <- additional_data %>%
+  filter(report_head) %>%
+  select(Note, report_head) %>%
+  mutate(report_no = row_number() + no_original_report) %>%
+  select(-report_head)
+
+clinical_notes_data_additional <- additional_data %>%
+  left_join(additional_report_head, by = c("Note")) %>%
+  mutate(report_no = na.locf(report_no),
+         Note = removeNumbers(Note)) %>%
+  filter(Note != "") %>%
+  mutate(note_processed = str_squish(Note)) %>%
+  transmute(note_processed,
+            dyspnea = as.numeric(Label),
+            report_head,
+            report_no,
+            Label) %>%
+  filter(!report_head) %>%
+  replace(is.na(.), 0) %>%
+  select(-report_head)
+
+no_additional_report <- clinical_notes_data_additional %>%
+  pull(report_no) %>%
+  max()
+
+no_training_report <- no_original_report * 3
+
+```
+
+```{r full_data, message = FALSE, warning = FALSE, results = 'hide'}
+
+# Bind rows of gold standard dataset and simclin dataset
+testing_notes_data_before_sampling <- clinical_notes_data %>% 
+  #bind_rows(clinical_notes_data_additional) %>% 
+  # Additional dataset only has 3 columns, so the rest of the labels will show NAs, replace those NAs with 0.
+  replace(is.na(.), 0) %>% 
+  # The sentence with at least 1 label will have "with_labels" as TRUE
+  mutate(with_labels = if_else(rowSums(.[3:16]) > 0, TRUE, FALSE))
+
+# There are 15,512 in total but only 1,605 with labels
+testing_notes_data_with_labels <- testing_notes_data_before_sampling %>% 
+  filter(with_labels)
+num_testing_notes_data_with_labels <- testing_notes_data_before_sampling %>% 
+  filter(with_labels) %>% 
+  nrow()
+
+# Randomly sample 1,605 * 2 = 3,210 sentences without label for the final dataset
+testing_notes_data_without_labels <- testing_notes_data_before_sampling %>% 
+  filter(!with_labels) %>% 
+  sample_n(num_testing_notes_data_with_labels * 2)
+
+# The final dataset will contain 4,815 rows
+full_testing_notes_data <- testing_notes_data_with_labels %>% 
+  bind_rows(testing_notes_data_without_labels)
+
+# # For report_level analysis
+# full_report_label <- full_clinical_notes_data %>% 
+#   group_by(report_no) %>% 
+#   summarize(sum_dyspnea = sum(dyspnea)) %>%
+#   mutate(dyspnea = if_else(sum_dyspnea > 0, 1, 0)) %>%
+#   select(-starts_with("sum_"))
+
+# A single clinical note has 123 sentences, on average.
+clinical_notes_data %>%
+  group_by(report_no) %>%
+  summarise(n_sentences = n()) %>%
+  summarise(avg_n = mean(n_sentences, na.rm = TRUE)) %>%
+  unlist %>%
+  unname
+
+```
+
+```{r training_data}
+
+# Bind rows of gold standard dataset and simclin dataset
+training_notes_data_before_sampling <- clinical_notes_data_additional %>% 
+  #bind_rows(clinical_notes_data_additional) %>% 
+  # Additional dataset only has 3 columns, so the rest of the labels will show NAs, replace those NAs with 0.
+  replace(is.na(.), 0) %>% 
+  # The sentence with at least 1 label will have "with_labels" as TRUE
+  #mutate(with_labels = if_else(rowSums(.[3:16]) > 0, TRUE, FALSE))
+  dplyr::rename(with_labels = Label) %>%
+  filter(report_no %in% (no_original_report + seq(1, no_training_report)))
+
+# There are 51,278 in total and 18,024 with labels
+training_notes_data_with_labels <- training_notes_data_before_sampling %>% 
+  filter(with_labels)
+num_training_notes_data_with_labels <- training_notes_data_before_sampling %>% 
+  filter(with_labels) %>% 
+  nrow()
+
+training_notes_data_without_labels <- training_notes_data_before_sampling %>% 
+  filter(!with_labels)
+
+# The final dataset will contain 4,815 rows
+full_training_notes_data <- training_notes_data_with_labels %>% 
+  bind_rows(training_notes_data_without_labels)
+```
+
+
+
+```{r collapsed_clinical_notes}
+# full_report_label_train <- training_notes_data_before_sampling %>% 
+#   group_by(report_no) %>% 
+#   summarize(sum_dyspnea = sum(dyspnea)) %>%
+#   mutate(dyspnea = if_else(sum_dyspnea > 0, 1, 0)) %>%
+#   select(-starts_with("sum_"))
+# 
+# full_clinical_notes_with_labels_train <- training_notes_data_before_sampling %>% 
+#   group_by(report_no) %>% 
+#   summarise(note_processed_all = str_c(note_processed, collapse = " ")) %>% 
+#   left_join(full_report_label_train, by = c("report_no"))
+
+full_report_label_test <- testing_notes_data_before_sampling %>% 
+  group_by(report_no) %>% 
+  summarize(sum_dyspnea = sum(dyspnea)) %>%
+  mutate(dyspnea = if_else(sum_dyspnea > 0, 1, 0)) %>%
+  select(-starts_with("sum_"))
+
+full_clinical_notes_with_labels_test <- testing_notes_data_before_sampling %>% 
+  group_by(report_no) %>% 
+  summarise(note_processed_all = str_c(note_processed, collapse = " ")) %>% 
+  left_join(full_report_label_test, by = c("report_no"))
+```
+
+
+
+```{r svm_model1}
+corpus_df = training_notes_data_before_sampling
+trainingSize <- round(nrow(corpus_df)*(2/3), 0)
+
+# fix error in package
+tmpfun <- get("create_matrix", envir = asNamespace("RTextTools"))
+environment(create_matrix) <- environment(tmpfun)
+assignInNamespace("create_matrix", create_matrix, ns = "RTextTools")
+
+dtMatrix <- create_matrix(corpus_df$note_processed, toLower = FALSE, removeNumbers = TRUE, #language="he", 
+                          removeStopwords = FALSE, removePunctuation=TRUE, stripWhitespace=TRUE, ngramLength =1)
+
+#debug info - print first Note and its most frequently terms
+freqTerms <- findFreqTerms(dtMatrix)
+#print(corpus_df[1,'Note'])
+firtsDoc_freqTerms <- findMostFreqTerms(dtMatrix, 10L)
+#print(firtsDoc_freqTerms[[1]])
+
+#write.csv(freqTerms, file = paste0(app_dir, file_folder, "/freqTerms_", model_type, ".csv"), fileEncoding = "UTF-8", row.names = FALSE)
+#write.csv(firtsDoc_freqTerms[[1]], file = paste0(app_dir, file_folder, "/firtsDoc_freqTerms_", model_type, ".csv"), fileEncoding = "UTF-8", row.names = FALSE)
+
+# Configure the training data
+#progress$set(detail = paste0("Configure the training data with ",trainingSize," notes.") ,value = 3)
+container <- RTextTools::create_container(dtMatrix, as.numeric(as.vector(corpus_df$with_labels)), trainSize = 1:trainingSize, testSize = (trainingSize + 1):nrow(corpus_df), virgin = FALSE)
+
+set.seed(1)             
+radial.tune <- tune.svm(x = container@training_matrix, 
+                        y = container@training_codes, 
+                        kernel = "radial", 
+                        cost = 100,
+                        #gamma = 0.5,
+                        probability = TRUE)
+summary(radial.tune)
+
+model <- radial.tune$best.model
+summary(model)
+
+#pred.radial <- predict(best.radial, newdata = dat[-rowTrain,])
+
+
+
+# svm_method_parameter <- "C-classification"
+# svm_cost_parameter <- 4
+# svm_gamma_parameter <- 1/nrow()
+# svm_kernel_parameter <- "radial"
+# parameters_of_model <- paste0("Method: SVM", ", Cost = ", svm_cost_parameter, ", Type = ", svm_method_parameter, ", Kernel = ", svm_kernel_parameter)
+# #progress$set(detail = paste0("Training the model...") ,value = 4)
+# model <- RTextTools::train_model(container, "SVM", kernel = svm_kernel_parameter, cost = svm_cost_parameter, method = svm_method_parameter, gamma = svm_gamma_parameter)
+
+#progress$set(detail = "Save the model..." ,value = 5)
+#save(model,file=paste0(app_dir, file_folder, "/trainedModel_",model_type,".Rd"))
+#save(dtMatrix,file=paste0(app_dir, file_folder, "/originalMatrix.Rd"))
+
+validationData <- corpus_df[(trainingSize + 1):(nrow(corpus_df)), ]
+#rm(corpus_df)
+
+#progress$set(detail = "Test the model..." ,value = 6)
+validatedLabels <- RTextTools::classify_model(container, model)
+validationData$validatedLabels <- validatedLabels
+
+
+# VIEW THE RESULTS BY CREATING ANALYTICS
+analytics <- RTextTools::create_analytics(container, validatedLabels)
+#algorythms_summary_table  <- DT::renderDataTable(analytics@algorithm_summary,  escape = FALSE)
+print(analytics@algorithm_summary)
+# precision_results <- paste0("TRUE -  ",analytics@algorithm_summary["1","SVM_PRECISION"],", FALSE - ",analytics@algorithm_summary["0","SVM_PRECISION"])
+# recall_results <- paste0("TRUE -  ",analytics@algorithm_summary["1","SVM_RECALL"],", FALSE - ",analytics@algorithm_summary["0","SVM_RECALL"])
+# 
+# validation_results_of_model <- paste0("Precision: ", precision_results, "; Recall: ", recall_results)
+
+```
+
+
+```{r svm_test1}
+predictionData = testing_notes_data_before_sampling
+
+# create a prediction document term matrix
+predMatrix <- create_matrix(predictionData$note_processed, originalMatrix = dtMatrix, toLower = FALSE, language="en", removeNumbers = TRUE, removeStopwords = FALSE,removePunctuation=TRUE, stripWhitespace=TRUE, ngramLength =1)
+
+pred_freqTerms <- findFreqTerms(predMatrix)
+#write.csv(pred_freqTerms,file=paste0(app_dir,file_folder, "/pred_freqTerms_",model_type,".csv"), fileEncoding="UTF-8", row.names = FALSE)
+
+# create the corresponding container
+predSize = length(predictionData$note_processed)
+predictionContainer <- RTextTools::create_container(predMatrix, labels=rep(0,predSize), testSize = 1:predSize, virgin = FALSE)
+
+# predict
+#progress$set(message  = "Predicting data", detail = "New data classification..." ,value = 3)
+predictedLabels <- RTextTools::classify_model(predictionContainer, model)
+
+#progress$close()
+ # predict by SVM (from RTextTool package)
+
+predictionData <- cbind(predictionData, predictedLabels)
+predictionData[["SVM_LABEL"]] <- as.logical(as.numeric(predictionData[["SVM_LABEL"]]) - 1)
+
+
+```
+
+```{r svm_metrics1}
+prevalence1 = sum(as.numeric(corpus_df$with_labels)) / nrow(corpus_df)
+
+pred = factor(as.numeric(predictionData[["SVM_LABEL"]]), levels = c(0, 1))
+
+truth = predictionData$dyspnea
+#select(contains("cat"), contains("copy"))
+
+
+n = sum(truth)
+truth = as.factor(truth)
+
+recall1 = caret::recall(pred, truth, relevant = "1")
+prec1 = caret::precision(pred, truth, relevant = "1")
+f1 = caret::F_meas(pred, truth, relevant = "1")
+n.label1 = sum(as.numeric(predictionData[["SVM_LABEL"]]))
+
+caret::confusionMatrix(data = as.factor(as.numeric(predictionData$SVM_LABEL)), 
+                reference = as.factor(predictionData$dyspnea))
+```
+
+
+
+
+### Predictions for chunks of 5 sentences
+
+```{r loading_data5, message = FALSE, warning = FALSE, results = 'hide'}
+chunk_size = 5
+
+# LOADING ORIGINAL DATASET (GOLD STANDARD)
+file_name <- file.path(params$data_folder, 'gold_standard_HF_100_pt_AV.csv')
+
+clinical_notes_raw_data <- file_name %>% 
+  readr::read_csv() %>% 
+  # X1 is the index column, unselect this column
+  select(-X1) %>% 
+  # report_head indicates the start of a note
+  mutate(report_head = str_detect(Note, "admission date"))
+
+new_rows_test = seq(1, ceiling(nrow(clinical_notes_raw_data)/chunk_size), 1)
+test = clinical_notes_raw_data %>%
+    mutate(chunk_id = sort(rep(new_rows_test, chunk_size))[1:nrow(.)]) %>%
+    tidyr::unite(Categories, contains("category")) %>%
+    group_by(chunk_id) %>%
+    summarise(Chunk = str_c(Note, collapse = " "),
+              Chunk_cats = str_c(Categories, collapse = "_") %>%
+                str_replace_all(c("NA_" = "", "_NA" = "")),
+              report_head = Reduce("|", report_head)) %>%
+    mutate(Chunk_cats = ifelse(Chunk_cats == "NA", NA, Chunk_cats)) %>%
+    dplyr::rename("Note" = Chunk, "Categories" = Chunk_cats) 
+
+# report_head contains the column report_no, a unique identifier for each report
+# the report_head dataframe contain report_no, a unique indentifier for each report
+report_head <- test %>% 
+  filter(report_head) %>% 
+  select(Note, report_head) %>% 
+  mutate(report_no = row_number()) %>% 
+  select(-report_head)
+
+clinical_notes_data <- test %>% 
+  # joint with report_head dataframe, report_no show which report each sentence belongs to
+  left_join(report_head, by = c("Note")) %>% 
+  mutate(report_no = na.locf(report_no),
+         # remove all numbers
+         Note = removeNumbers(Note)) %>% 
+  # remove lines with no sentences
+  filter(Note != "") %>% 
+  #tidyr::unite(Categories, contains("category")) %>%
+  #select(-contains("copy")) %>%
+  # remove unnecessary whitespaces
+  mutate(note_processed = str_squish(Note)) %>% 
+  transmute(note_processed,
+            report_head,
+            report_no,
+            Categories) %>%
+  #filter(!report_head) %>% 
+  # Create 14 label columns (one-hot encoding)
+  mutate(dyspnea = as.numeric(grepl("Dyspnea", Categories)),
+         confusions = as.numeric(grepl("Confusion", Categories)),
+         fatique = as.numeric(grepl("Fatigue", Categories)),
+         abdomen.distension = as.numeric(grepl("abdomen.distension", Categories)),
+         cough = as.numeric(grepl("Cough", Categories)),
+         peripheral.edema = as.numeric(grepl("peripheral.edema", Categories)),
+         anorexia = as.numeric(grepl("Anorexia", Categories)),
+         wheeze = as.numeric(grepl("Wheeze", Categories)),
+         weight.change = as.numeric(grepl("Weight.loss.or.weight.gain", Categories)),
+         nausea = as.numeric(grepl("Nausea", Categories)),
+         chest.pain = as.numeric(grepl("Chest.pain", Categories)),
+         palpitation = as.numeric(grepl("Palpitation", Categories)),
+         exercise.intolerance = as.numeric(grepl("Exercise.intolerance", Categories)),
+         dizziness = as.numeric(grepl("Dizziness", Categories))) %>% 
+  # replace NA with 0
+  replace(is.na(.), 0) %>% 
+  select(-c(Categories, report_head))
+
+no_original_report <- clinical_notes_data %>% 
+  pull(report_no) %>% 
+  max()
+```
+
+```{r loading_additional_data5, message = FALSE, warning = FALSE, results = 'hide'}
+
+# LABELED SENTENCES BY SIMCLINS
+# Same logic for processing dataset as above. Import labeled data - labeled by NimbleMiner for Dyspnea
+
+labeled_training_notes_file <- file.path(params$data_folder, paste0('dyspnea_training_notes_NMlabeled_chunk', chunk_size, '.csv'))
+
+additional_data <- labeled_training_notes_file %>%
+  readr::read_csv() %>%
+  #select(-X1) %>%
+  mutate(Note = tolower(Note)) %>%
+  mutate(report_head = str_detect(Note, "admission date"))
+
+additional_report_head <- additional_data %>%
+  filter(report_head) %>%
+  select(Note, report_head) %>%
+  mutate(report_no = row_number() + no_original_report) %>%
+  select(-report_head)
+
+clinical_notes_data_additional <- additional_data %>%
+  left_join(additional_report_head, by = c("Note")) %>%
+  mutate(report_no = na.locf(report_no),
+         Note = removeNumbers(Note)) %>%
+  filter(Note != "") %>%
+  mutate(note_processed = str_squish(Note)) %>%
+  transmute(note_processed,
+            dyspnea = as.numeric(Label),
+            report_head,
+            report_no,
+            Label) %>%
+  #filter(!report_head) %>%
+  replace(is.na(.), 0) #%>% select(-report_head)
+
+no_additional_report <- clinical_notes_data_additional %>%
+  pull(report_no) %>%
+  max()
+
+#no_training_report <- no_original_report * 3
+
+```
+
+```{r full_data5, message = FALSE, warning = FALSE, results = 'hide'}
+
+# Bind rows of gold standard dataset and simclin dataset
+testing_notes_data_before_sampling <- clinical_notes_data %>% 
+  #bind_rows(clinical_notes_data_additional) %>% 
+  # Additional dataset only has 3 columns, so the rest of the labels will show NAs, replace those NAs with 0.
+  replace(is.na(.), 0) %>% 
+  # The sentence with at least 1 label will have "with_labels" as TRUE
+  mutate(with_labels = if_else(rowSums(.[3:16]) > 0, TRUE, FALSE))
+
+# There are 2,652 in total but only 264 with labels
+testing_notes_data_with_labels <- testing_notes_data_before_sampling %>% 
+  filter(with_labels==TRUE)
+num_testing_notes_data_with_labels <- testing_notes_data_before_sampling %>% 
+  filter(with_labels) %>% 
+  nrow()
+
+# Randomly sample 264 * 2 = 528 sentences without label for the final dataset
+testing_notes_data_without_labels <- testing_notes_data_before_sampling %>% 
+  filter(!with_labels) %>% 
+  sample_n(num_testing_notes_data_with_labels * 2)
+
+# The final dataset will contain 792 rows
+full_testing_notes_data <- testing_notes_data_with_labels %>% 
+  bind_rows(testing_notes_data_without_labels)
+
+# # For report_level analysis
+# full_report_label <- full_clinical_notes_data %>% 
+#   group_by(report_no) %>% 
+#   summarize(sum_dyspnea = sum(dyspnea)) %>%
+#   mutate(dyspnea = if_else(sum_dyspnea > 0, 1, 0)) %>%
+#   select(-starts_with("sum_"))
+
+```
+
+```{r training_data5}
+
+# Bind rows of gold standard dataset and simclin dataset
+training_notes_data_before_sampling <- clinical_notes_data_additional %>% 
+  #bind_rows(clinical_notes_data_additional) %>% 
+  # Additional dataset only has 3 columns, so the rest of the labels will show NAs, replace those NAs with 0.
+  replace(is.na(.), 0) %>% 
+  # The sentence with at least 1 label will have "with_labels" as TRUE
+  #mutate(with_labels = if_else(rowSums(.[3:16]) > 0, TRUE, FALSE))
+  dplyr::rename(with_labels = Label) %>% 
+  #filter(report_no %in% (no_original_report + seq(1, no_training_report)))
+  slice(1:(3 * nrow(testing_notes_data_before_sampling)))
+
+no_training_report = max(training_notes_data_before_sampling$report_no) - no_original_report
+
+# There are 7875 in total and 3275 with labels
+training_notes_data_with_labels <- training_notes_data_before_sampling %>% 
+  filter(with_labels)
+num_training_notes_data_with_labels <- training_notes_data_before_sampling %>% 
+  filter(with_labels) %>% 
+  nrow()
+
+training_notes_data_without_labels <- training_notes_data_before_sampling %>% 
+  filter(!with_labels)
+
+# The final dataset will contain 4,815 rows
+full_training_notes_data <- training_notes_data_with_labels %>% 
+  bind_rows(training_notes_data_without_labels)
+```
+
+
+```{r svm_model5}
+corpus_df = training_notes_data_before_sampling
+trainingSize <- round(nrow(corpus_df)*(2/3), 0)
+
+# fix error in package
+tmpfun <- get("create_matrix", envir = asNamespace("RTextTools"))
+environment(create_matrix) <- environment(tmpfun)
+assignInNamespace("create_matrix", create_matrix, ns = "RTextTools")
+
+dtMatrix <- create_matrix(corpus_df$note_processed, toLower = FALSE, removeNumbers = TRUE, #language="he", 
+                          removeStopwords = FALSE, removePunctuation=TRUE, stripWhitespace=TRUE, ngramLength =1)
+
+#debug info - print first Note and its most frequently terms
+freqTerms <- findFreqTerms(dtMatrix)
+#print(corpus_df[1,'Note'])
+firtsDoc_freqTerms <- findMostFreqTerms(dtMatrix, 10L)
+#print(firtsDoc_freqTerms[[1]])
+
+#write.csv(freqTerms, file = paste0(app_dir, file_folder, "/freqTerms_", model_type, ".csv"), fileEncoding = "UTF-8", row.names = FALSE)
+#write.csv(firtsDoc_freqTerms[[1]], file = paste0(app_dir, file_folder, "/firtsDoc_freqTerms_", model_type, ".csv"), fileEncoding = "UTF-8", row.names = FALSE)
+
+# Configure the training data
+#progress$set(detail = paste0("Configure the training data with ",trainingSize," notes.") ,value = 3)
+container <- RTextTools::create_container(dtMatrix, as.numeric(as.vector(corpus_df$with_labels)), trainSize = 1:trainingSize, testSize = (trainingSize + 1):nrow(corpus_df), virgin = FALSE)
+
+set.seed(1)             
+radial.tune <- tune.svm(x = container@training_matrix, 
+                        y = container@training_codes, 
+                        kernel = "radial", 
+                        cost = 100,
+                        #gamma = 0.5,
+                        probability = TRUE)
+summary(radial.tune)
+
+model <- radial.tune$best.model
+summary(model)
+
+#pred.radial <- predict(best.radial, newdata = dat[-rowTrain,])
+
+
+
+# svm_method_parameter <- "C-classification"
+# svm_cost_parameter <- 4
+# svm_gamma_parameter <- 1/nrow()
+# svm_kernel_parameter <- "radial"
+# parameters_of_model <- paste0("Method: SVM", ", Cost = ", svm_cost_parameter, ", Type = ", svm_method_parameter, ", Kernel = ", svm_kernel_parameter)
+# #progress$set(detail = paste0("Training the model...") ,value = 4)
+# model <- RTextTools::train_model(container, "SVM", kernel = svm_kernel_parameter, cost = svm_cost_parameter, method = svm_method_parameter, gamma = svm_gamma_parameter)
+
+#progress$set(detail = "Save the model..." ,value = 5)
+#save(model,file=paste0(app_dir, file_folder, "/trainedModel_",model_type,".Rd"))
+#save(dtMatrix,file=paste0(app_dir, file_folder, "/originalMatrix.Rd"))
+
+validationData <- corpus_df[(trainingSize + 1):(nrow(corpus_df)), ]
+#rm(corpus_df)
+
+#progress$set(detail = "Test the model..." ,value = 6)
+validatedLabels <- RTextTools::classify_model(container, model)
+validationData$validatedLabels <- validatedLabels
+
+
+# VIEW THE RESULTS BY CREATING ANALYTICS
+analytics <- RTextTools::create_analytics(container, validatedLabels)
+#algorythms_summary_table  <- DT::renderDataTable(analytics@algorithm_summary,  escape = FALSE)
+print(analytics@algorithm_summary)
+# precision_results <- paste0("TRUE -  ",analytics@algorithm_summary["1","SVM_PRECISION"],", FALSE - ",analytics@algorithm_summary["0","SVM_PRECISION"])
+# recall_results <- paste0("TRUE -  ",analytics@algorithm_summary["1","SVM_RECALL"],", FALSE - ",analytics@algorithm_summary["0","SVM_RECALL"])
+# 
+# validation_results_of_model <- paste0("Precision: ", precision_results, "; Recall: ", recall_results)
+
+```
+
+
+```{r svm_test5}
+predictionData = testing_notes_data_before_sampling
+
+# create a prediction document term matrix
+predMatrix <- create_matrix(predictionData$note_processed, originalMatrix = dtMatrix, toLower = FALSE, language="en", removeNumbers = TRUE, removeStopwords = FALSE,removePunctuation=TRUE, stripWhitespace=TRUE, ngramLength =1)
+
+pred_freqTerms <- findFreqTerms(predMatrix)
+#write.csv(pred_freqTerms,file=paste0(app_dir,file_folder, "/pred_freqTerms_",model_type,".csv"), fileEncoding="UTF-8", row.names = FALSE)
+
+# create the corresponding container
+predSize = length(predictionData$note_processed)
+predictionContainer <- RTextTools::create_container(predMatrix, labels=rep(0,predSize), testSize = 1:predSize, virgin = FALSE)
+
+# predict
+#progress$set(message  = "Predicting data", detail = "New data classification..." ,value = 3)
+predictedLabels <- RTextTools::classify_model(predictionContainer, model)
+
+#progress$close()
+ # predict by SVM (from RTextTool package)
+
+predictionData <- cbind(predictionData, predictedLabels)
+predictionData[["SVM_LABEL"]] <- as.logical(as.numeric(predictionData[["SVM_LABEL"]]) - 1)
+
+
+```
+
+```{r svm_metrics5}
+prevalence5 = sum(as.numeric(corpus_df$with_labels)) / nrow(corpus_df)
+
+pred = factor(as.numeric(predictionData[["SVM_LABEL"]]), levels = c(0, 1))
+
+truth = predictionData$dyspnea
+#select(contains("cat"), contains("copy"))
+
+
+n = sum(truth)
+truth = as.factor(truth)
+
+recall5 = caret::recall(pred, truth, relevant = "1")
+prec5 = caret::precision(pred, truth, relevant = "1")
+f5 = caret::F_meas(pred, truth, relevant = "1")
+n.label5 = sum(as.numeric(predictionData[["SVM_LABEL"]]))
+
+caret::confusionMatrix(data = as.factor(as.numeric(predictionData$SVM_LABEL)), 
+                reference = as.factor(predictionData$dyspnea))
+```
+
+
+
+### Predictions for chunks of 10 sentences
+
+```{r loading_data10, message = FALSE, warning = FALSE, results = 'hide'}
+chunk_size = 10
+
+# LOADING ORIGINAL DATASET (GOLD STANDARD)
+file_name <- file.path(params$data_folder, 'gold_standard_HF_100_pt_AV.csv')
+
+clinical_notes_raw_data <- file_name %>% 
+  readr::read_csv() %>% 
+  # X1 is the index column, unselect this column
+  select(-X1) %>% 
+  # report_head indicates the start of a note
+  mutate(report_head = str_detect(Note, "admission date"))
+
+new_rows_test = seq(1, ceiling(nrow(clinical_notes_raw_data)/chunk_size), 1)
+test = clinical_notes_raw_data %>%
+    mutate(chunk_id = sort(rep(new_rows_test, chunk_size))[1:nrow(.)]) %>%
+    tidyr::unite(Categories, contains("category")) %>%
+    group_by(chunk_id) %>%
+    summarise(Chunk = str_c(Note, collapse = " "),
+              Chunk_cats = str_c(Categories, collapse = "_") %>%
+                str_replace_all(c("NA_" = "", "_NA" = "")),
+              report_head = Reduce("|", report_head)) %>%
+    mutate(Chunk_cats = ifelse(Chunk_cats == "NA", NA, Chunk_cats)) %>%
+    dplyr::rename("Note" = Chunk, "Categories" = Chunk_cats) 
+
+# report_head contains the column report_no, a unique identifier for each report
+# the report_head dataframe contain report_no, a unique indentifier for each report
+report_head <- test %>% 
+  filter(report_head) %>% 
+  select(Note, report_head) %>% 
+  mutate(report_no = row_number()) %>% 
+  select(-report_head)
+
+clinical_notes_data <- test %>% 
+  # joint with report_head dataframe, report_no show which report each sentence belongs to
+  left_join(report_head, by = c("Note")) %>% 
+  mutate(report_no = na.locf(report_no),
+         # remove all numbers
+         Note = removeNumbers(Note)) %>% 
+  # remove lines with no sentences
+  filter(Note != "") %>% 
+  #tidyr::unite(Categories, contains("category")) %>%
+  #select(-contains("copy")) %>%
+  # remove unnecessary whitespaces
+  mutate(note_processed = str_squish(Note)) %>% 
+  transmute(note_processed,
+            report_head,
+            report_no,
+            Categories) %>%
+  #filter(!report_head) %>% 
+  # Create 14 label columns (one-hot encoding)
+  mutate(dyspnea = as.numeric(grepl("Dyspnea", Categories)),
+         confusions = as.numeric(grepl("Confusion", Categories)),
+         fatique = as.numeric(grepl("Fatigue", Categories)),
+         abdomen.distension = as.numeric(grepl("abdomen.distension", Categories)),
+         cough = as.numeric(grepl("Cough", Categories)),
+         peripheral.edema = as.numeric(grepl("peripheral.edema", Categories)),
+         anorexia = as.numeric(grepl("Anorexia", Categories)),
+         wheeze = as.numeric(grepl("Wheeze", Categories)),
+         weight.change = as.numeric(grepl("Weight.loss.or.weight.gain", Categories)),
+         nausea = as.numeric(grepl("Nausea", Categories)),
+         chest.pain = as.numeric(grepl("Chest.pain", Categories)),
+         palpitation = as.numeric(grepl("Palpitation", Categories)),
+         exercise.intolerance = as.numeric(grepl("Exercise.intolerance", Categories)),
+         dizziness = as.numeric(grepl("Dizziness", Categories))) %>% 
+  # replace NA with 0
+  replace(is.na(.), 0) %>% 
+  select(-c(Categories, report_head))
+
+no_original_report <- clinical_notes_data %>% 
+  pull(report_no) %>% 
+  max()
+```
+
+```{r loading_additional_data10, message = FALSE, warning = FALSE, results = 'hide'}
+
+# LABELED SENTENCES BY SIMCLINS
+# Same logic for processing dataset as above. Import labeled data - labeled by NimbleMiner for Dyspnea
+
+labeled_training_notes_file <- file.path(params$data_folder, paste0('dyspnea_training_notes_NMlabeled_chunk', chunk_size, '.csv'))
+
+additional_data <- labeled_training_notes_file %>%
+  readr::read_csv() %>%
+  #select(-X1) %>%
+  mutate(Note = tolower(Note)) %>%
+  mutate(report_head = str_detect(Note, "admission date"))
+
+additional_report_head <- additional_data %>%
+  filter(report_head) %>%
+  select(Note, report_head) %>%
+  mutate(report_no = row_number() + no_original_report) %>%
+  select(-report_head)
+
+clinical_notes_data_additional <- additional_data %>%
+  left_join(additional_report_head, by = c("Note")) %>%
+  mutate(report_no = na.locf(report_no),
+         Note = removeNumbers(Note)) %>%
+  filter(Note != "") %>%
+  mutate(note_processed = str_squish(Note)) %>%
+  transmute(note_processed,
+            dyspnea = as.numeric(Label),
+            report_head,
+            report_no,
+            Label) %>%
+  #filter(!report_head) %>%
+  replace(is.na(.), 0) #%>% select(-report_head)
+
+no_additional_report <- clinical_notes_data_additional %>%
+  pull(report_no) %>%
+  max()
+
+#no_training_report <- no_original_report * 3
+
+```
+
+```{r full_data10, message = FALSE, warning = FALSE, results = 'hide'}
+
+# Bind rows of gold standard dataset and simclin dataset
+testing_notes_data_before_sampling <- clinical_notes_data %>% 
+  #bind_rows(clinical_notes_data_additional) %>% 
+  # Additional dataset only has 3 columns, so the rest of the labels will show NAs, replace those NAs with 0.
+  replace(is.na(.), 0) %>% 
+  # The sentence with at least 1 label will have "with_labels" as TRUE
+  mutate(with_labels = if_else(rowSums(.[3:16]) > 0, TRUE, FALSE))
+
+# There are 2,652 in total but only 264 with labels
+testing_notes_data_with_labels <- testing_notes_data_before_sampling %>% 
+  filter(with_labels)
+num_testing_notes_data_with_labels <- testing_notes_data_before_sampling %>% 
+  filter(with_labels) %>% 
+  nrow()
+
+# Randomly sample 264 * 2 = 528 sentences without label for the final dataset
+testing_notes_data_without_labels <- testing_notes_data_before_sampling %>% 
+  filter(!with_labels) %>% 
+  sample_n(num_testing_notes_data_with_labels * 2)
+
+# The final dataset will contain 792 rows
+full_testing_notes_data <- testing_notes_data_with_labels %>% 
+  bind_rows(testing_notes_data_without_labels)
+
+# # For report_level analysis
+# full_report_label <- full_clinical_notes_data %>% 
+#   group_by(report_no) %>% 
+#   summarize(sum_dyspnea = sum(dyspnea)) %>%
+#   mutate(dyspnea = if_else(sum_dyspnea > 0, 1, 0)) %>%
+#   select(-starts_with("sum_"))
+
+```
+
+```{r training_data10}
+
+# Bind rows of gold standard dataset and simclin dataset
+training_notes_data_before_sampling <- clinical_notes_data_additional %>% 
+  #bind_rows(clinical_notes_data_additional) %>% 
+  # Additional dataset only has 3 columns, so the rest of the labels will show NAs, replace those NAs with 0.
+  replace(is.na(.), 0) %>% 
+  # The sentence with at least 1 label will have "with_labels" as TRUE
+  #mutate(with_labels = if_else(rowSums(.[3:16]) > 0, TRUE, FALSE))
+  dplyr::rename(with_labels = Label) %>% 
+  #filter(report_no %in% (no_original_report + seq(1, no_training_report)))
+  slice(1:(3 * nrow(testing_notes_data_before_sampling)))
+
+no_training_report = max(training_notes_data_before_sampling$report_no) - no_original_report
+
+# There are 7875 in total and 3275 with labels
+training_notes_data_with_labels <- training_notes_data_before_sampling %>% 
+  filter(with_labels)
+num_training_notes_data_with_labels <- training_notes_data_before_sampling %>% 
+  filter(with_labels) %>% 
+  nrow()
+
+training_notes_data_without_labels <- training_notes_data_before_sampling %>% 
+  filter(!with_labels)
+
+# The final dataset will contain 4,815 rows
+full_training_notes_data <- training_notes_data_with_labels %>% 
+  bind_rows(training_notes_data_without_labels)
+```
+
+
+```{r svm_model10}
+corpus_df = training_notes_data_before_sampling
+trainingSize <- round(nrow(corpus_df)*(2/3), 0)
+
+# fix error in package
+tmpfun <- get("create_matrix", envir = asNamespace("RTextTools"))
+environment(create_matrix) <- environment(tmpfun)
+assignInNamespace("create_matrix", create_matrix, ns = "RTextTools")
+
+dtMatrix <- create_matrix(corpus_df$note_processed, toLower = FALSE, removeNumbers = TRUE, #language="he", 
+                          removeStopwords = FALSE, removePunctuation=TRUE, stripWhitespace=TRUE, ngramLength =1)
+
+#debug info - print first Note and its most frequently terms
+freqTerms <- findFreqTerms(dtMatrix)
+#print(corpus_df[1,'Note'])
+firtsDoc_freqTerms <- findMostFreqTerms(dtMatrix, 10L)
+#print(firtsDoc_freqTerms[[1]])
+
+#write.csv(freqTerms, file = paste0(app_dir, file_folder, "/freqTerms_", model_type, ".csv"), fileEncoding = "UTF-8", row.names = FALSE)
+#write.csv(firtsDoc_freqTerms[[1]], file = paste0(app_dir, file_folder, "/firtsDoc_freqTerms_", model_type, ".csv"), fileEncoding = "UTF-8", row.names = FALSE)
+
+# Configure the training data
+#progress$set(detail = paste0("Configure the training data with ",trainingSize," notes.") ,value = 3)
+container <- RTextTools::create_container(dtMatrix, as.numeric(as.vector(corpus_df$with_labels)), trainSize = 1:trainingSize, testSize = (trainingSize + 1):nrow(corpus_df), virgin = FALSE)
+
+set.seed(1)             
+radial.tune <- tune.svm(x = container@training_matrix, 
+                        y = container@training_codes, 
+                        kernel = "radial", 
+                        cost = 200,
+                        #gamma = 0.5,
+                        probability = TRUE)
+summary(radial.tune)
+
+model <- radial.tune$best.model
+summary(model)
+
+#pred.radial <- predict(best.radial, newdata = dat[-rowTrain,])
+
+
+
+# svm_method_parameter <- "C-classification"
+# svm_cost_parameter <- 4
+# svm_gamma_parameter <- 1/nrow()
+# svm_kernel_parameter <- "radial"
+# parameters_of_model <- paste0("Method: SVM", ", Cost = ", svm_cost_parameter, ", Type = ", svm_method_parameter, ", Kernel = ", svm_kernel_parameter)
+# #progress$set(detail = paste0("Training the model...") ,value = 4)
+# model <- RTextTools::train_model(container, "SVM", kernel = svm_kernel_parameter, cost = svm_cost_parameter, method = svm_method_parameter, gamma = svm_gamma_parameter)
+
+#progress$set(detail = "Save the model..." ,value = 5)
+#save(model,file=paste0(app_dir, file_folder, "/trainedModel_",model_type,".Rd"))
+#save(dtMatrix,file=paste0(app_dir, file_folder, "/originalMatrix.Rd"))
+
+validationData <- corpus_df[(trainingSize + 1):(nrow(corpus_df)), ]
+#rm(corpus_df)
+
+#progress$set(detail = "Test the model..." ,value = 6)
+validatedLabels <- RTextTools::classify_model(container, model)
+validationData$validatedLabels <- validatedLabels
+
+
+# VIEW THE RESULTS BY CREATING ANALYTICS
+analytics <- RTextTools::create_analytics(container, validatedLabels)
+#algorythms_summary_table  <- DT::renderDataTable(analytics@algorithm_summary,  escape = FALSE)
+print(analytics@algorithm_summary)
+# precision_results <- paste0("TRUE -  ",analytics@algorithm_summary["1","SVM_PRECISION"],", FALSE - ",analytics@algorithm_summary["0","SVM_PRECISION"])
+# recall_results <- paste0("TRUE -  ",analytics@algorithm_summary["1","SVM_RECALL"],", FALSE - ",analytics@algorithm_summary["0","SVM_RECALL"])
+# 
+# validation_results_of_model <- paste0("Precision: ", precision_results, "; Recall: ", recall_results)
+
+```
+
+
+```{r svm_test10}
+predictionData = testing_notes_data_before_sampling
+
+# create a prediction document term matrix
+predMatrix <- create_matrix(predictionData$note_processed, originalMatrix = dtMatrix, toLower = FALSE, language="en", removeNumbers = TRUE, removeStopwords = FALSE,removePunctuation=TRUE, stripWhitespace=TRUE, ngramLength =1)
+
+pred_freqTerms <- findFreqTerms(predMatrix)
+#write.csv(pred_freqTerms,file=paste0(app_dir,file_folder, "/pred_freqTerms_",model_type,".csv"), fileEncoding="UTF-8", row.names = FALSE)
+
+# create the corresponding container
+predSize = length(predictionData$note_processed)
+predictionContainer <- RTextTools::create_container(predMatrix, labels=rep(0,predSize), testSize = 1:predSize, virgin = FALSE)
+
+# predict
+#progress$set(message  = "Predicting data", detail = "New data classification..." ,value = 3)
+predictedLabels <- RTextTools::classify_model(predictionContainer, model)
+
+#progress$close()
+ # predict by SVM (from RTextTool package)
+
+predictionData <- cbind(predictionData, predictedLabels)
+predictionData[["SVM_LABEL"]] <- as.logical(as.numeric(predictionData[["SVM_LABEL"]]) - 1)
+
+
+```
+
+```{r svm_metrics10}
+prevalence10 = sum(as.numeric(corpus_df$with_labels)) / nrow(corpus_df)
+
+pred = factor(as.numeric(predictionData[["SVM_LABEL"]]), levels = c(0, 1))
+
+truth = predictionData$dyspnea
+#select(contains("cat"), contains("copy"))
+
+
+n = sum(truth)
+truth = as.factor(truth)
+
+recall10 = caret::recall(pred, truth, relevant = "1")
+prec10 = caret::precision(pred, truth, relevant = "1")
+f10 = caret::F_meas(pred, truth, relevant = "1")
+n.label10 = sum(as.numeric(predictionData[["SVM_LABEL"]]))
+
+caret::confusionMatrix(data = as.factor(as.numeric(predictionData$SVM_LABEL)), 
+                reference = as.factor(predictionData$dyspnea))
+```
+
+
+
+### Full clinical report prediction
+
+```{r importfullnote}
+full_notes_training <- file.path(params$data_folder, paste0('dyspnea_fullnotes_training.csv'))
+
+full_clinical_notes_with_labels_train <- full_notes_training %>%
+  readr::read_csv()
+
+set.seed(1)
+new_order = sample(nrow(full_clinical_notes_with_labels_train), 
+                   nrow(full_clinical_notes_with_labels_train))
+
+```
+
+
+```{r svm_modelfull}
+corpus_df = full_clinical_notes_with_labels_train[new_order, ] %>%
+  dplyr::rename("note_processed" = "Note")
+trainingSize <- round(nrow(corpus_df)*(2/3), 0)
+
+# fix error in package
+tmpfun <- get("create_matrix", envir = asNamespace("RTextTools"))
+environment(create_matrix) <- environment(tmpfun)
+assignInNamespace("create_matrix", create_matrix, ns = "RTextTools")
+
+dtMatrix <- create_matrix(corpus_df$note_processed, toLower = FALSE, removeNumbers = TRUE, #language="he", 
+                          removeStopwords = FALSE, removePunctuation=TRUE, stripWhitespace=TRUE, ngramLength =1)
+
+#debug info - print first Note and its most frequently terms
+freqTerms <- findFreqTerms(dtMatrix)
+#print(corpus_df[1,'Note'])
+firtsDoc_freqTerms <- findMostFreqTerms(dtMatrix, 10L)
+#print(firtsDoc_freqTerms[[1]])
+
+#write.csv(freqTerms, file = paste0(app_dir, file_folder, "/freqTerms_", model_type, ".csv"), fileEncoding = "UTF-8", row.names = FALSE)
+#write.csv(firtsDoc_freqTerms[[1]], file = paste0(app_dir, file_folder, "/firtsDoc_freqTerms_", model_type, ".csv"), fileEncoding = "UTF-8", row.names = FALSE)
+
+# Configure the training data
+#progress$set(detail = paste0("Configure the training data with ",trainingSize," notes.") ,value = 3)
+container <- RTextTools::create_container(dtMatrix, as.vector(corpus_df$dyspnea), trainSize = 1:trainingSize, testSize = (trainingSize + 1):nrow(corpus_df), virgin = FALSE)
+
+set.seed(1)             
+radial.tune <- tune.svm(x = container@training_matrix, 
+                        y = container@training_codes, 
+                        kernel = "radial", 
+                        cost = 10^(-1:2),
+                        #gamma = 0.5,
+                        probability = TRUE)
+summary(radial.tune)
+
+model <- radial.tune$best.model
+summary(model)
+
+validationData <- corpus_df[(trainingSize + 1):(nrow(corpus_df)), ]
+#rm(corpus_df)
+
+#progress$set(detail = "Test the model..." ,value = 6)
+validatedLabels <- RTextTools::classify_model(container, model)
+validationData$validatedLabels <- validatedLabels
+
+
+# VIEW THE RESULTS BY CREATING ANALYTICS
+analytics <- RTextTools::create_analytics(container, validatedLabels)
+#algorythms_summary_table  <- DT::renderDataTable(analytics@algorithm_summary,  escape = FALSE)
+print(analytics@algorithm_summary)
+
+```
+
+
+```{r svm_testfull}
+predictionData = full_clinical_notes_with_labels_test %>%
+  dplyr::rename("note_processed" = "note_processed_all")
+
+# create a prediction document term matrix
+predMatrix <- create_matrix(predictionData$note_processed, originalMatrix = dtMatrix, toLower = FALSE, language="en", removeNumbers = TRUE, removeStopwords = FALSE,removePunctuation=TRUE, stripWhitespace=TRUE, ngramLength =1)
+
+pred_freqTerms <- findFreqTerms(predMatrix)
+#write.csv(pred_freqTerms,file=paste0(app_dir,file_folder, "/pred_freqTerms_",model_type,".csv"), fileEncoding="UTF-8", row.names = FALSE)
+
+# create the corresponding container
+predSize = length(predictionData$note_processed)
+predictionContainer <- RTextTools::create_container(predMatrix, labels=rep(0,predSize), testSize = 1:predSize, virgin = FALSE)
+
+# predict
+#progress$set(message  = "Predicting data", detail = "New data classification..." ,value = 3)
+predictedLabels <- RTextTools::classify_model(predictionContainer, model)
+
+#progress$close()
+ # predict by SVM (from RTextTool package)
+
+predictionData <- cbind(predictionData, predictedLabels)
+predictionData[["SVM_LABEL"]] <- as.logical(as.numeric(predictionData[["SVM_LABEL"]]) - 1)
+
+
+```
+
+```{r svm_metricsfull}
+prevalence_full = sum(as.numeric(corpus_df$dyspnea)) / nrow(corpus_df)
+
+pred_full = factor(as.numeric(predictionData[["SVM_LABEL"]]), levels = c(0, 1))
+
+truth = predictionData$dyspnea
+#select(contains("cat"), contains("copy"))
+
+
+n = sum(truth)
+truth = as.factor(truth)
+
+recall_full = caret::recall(pred_full, truth, relevant = "1")
+prec_full = caret::precision(pred_full, truth, relevant = "1")
+f_full = caret::F_meas(pred_full, truth, relevant = "1")
+n.label_full = sum(as.numeric(predictionData[["SVM_LABEL"]]))
+
+caret::confusionMatrix(data = factor(as.numeric(predictionData$SVM_LABEL), levels = c(0, 1)), 
+                reference = as.factor(predictionData$dyspnea))
+```
+
+
+
+```{r results table}
+
+data.frame(`Chunk size` = c(1, 5, 10, "Full note"),
+           Recall = c(recall1, recall5, recall10, recall_full),
+           Precision = c(prec1, prec5, prec10, prec_full),
+           `F score` = c(f1, f5, f10, f_full),
+           `Train set prevalence` = c(prevalence1, prevalence5, prevalence10, prevalence_full)) %>%
+  knitr::kable()
+
+```
+

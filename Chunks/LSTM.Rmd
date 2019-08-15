@@ -1,0 +1,906 @@
+---
+title: "LSTM model (Dyspnea)"
+author: "Alyssa Vanderbeek"
+date: "7/29/2019"
+output: html_document
+params:
+  data_folder: "~/Desktop/DSI_NimbleMiner/NimbleMiner_ML/Chunks/data/"
+---
+
+```{r loading_packages, , echo = FALSE, message = FALSE, warning = FALSE, results = 'hide'}
+pkg <- c("devtools"
+        ,"pander"
+        ,"knitr"
+        ,"dplyr"
+        ,"tidyr"
+        ,"stringr"
+        ,"lubridate"
+        ,"purrr"
+        ,"DT"
+        ,"tidytext"
+        ,"ggplot2"
+        ,"textstem"
+        ,"tm"
+        ,"splitstackshape"
+        ,"text2vec"
+        ,"reshape"
+        ,"readr"
+        ,"zoo"
+        ,"keras")
+invisible(lapply(pkg, library, character.only = TRUE))
+options(warn = 0)
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+chunk_size = 1
+category = "Dyspnea"
+```
+
+```{r loading_data, message = FALSE, warning = FALSE, results = 'hide'}
+
+# LOADING ORIGINAL DATASET (GOLD STANDARD)
+file_name <- file.path(params$data_folder, 'gold_standard_HF_100_pt_AV.csv')
+
+clinical_notes_raw_data <- file_name %>% 
+  readr::read_csv() %>% 
+  # X1 is the index column, unselect this column
+  select(-X1) %>% 
+  # report_head indicates the start of a note
+  mutate(report_head = str_detect(Note, "^admission date"))
+
+# report_head contains the column report_no, a unique identifier for each report
+# the report_head dataframe contain report_no, a unique indentifier for each report
+report_head <- clinical_notes_raw_data %>% 
+  filter(report_head) %>% 
+  select(Note, report_head) %>% 
+  mutate(report_no = row_number()) %>% 
+  select(-report_head)
+
+clinical_notes_data <- clinical_notes_raw_data %>% 
+  # joint with report_head dataframe, report_no show which report each sentence belongs to
+  left_join(report_head, by = c("Note")) %>% 
+  mutate(report_no = na.locf(report_no),
+         # remove all numbers
+         Note = removeNumbers(Note)) %>% 
+  # remove lines with no sentences
+  filter(Note != "") %>% 
+  tidyr::unite(Categories, contains("category")) %>%
+  select(-contains("copy")) %>%
+  # remove unnecessary whitespaces
+  mutate(note_processed = str_squish(Note)) %>% 
+  transmute(note_processed,
+            report_head,
+            report_no,
+            Categories) %>%
+  filter(!report_head) %>% 
+  # Create 14 label columns (one-hot encoding)
+  mutate(dyspnea = as.numeric(grepl("Dyspnea", Categories)),
+         confusions = as.numeric(grepl("Confusion", Categories)),
+         fatique = as.numeric(grepl("Fatigue", Categories)),
+         abdomen.distension = as.numeric(grepl("abdomen.distension", Categories)),
+         cough = as.numeric(grepl("Cough", Categories)),
+         peripheral.edema = as.numeric(grepl("peripheral.edema", Categories)),
+         anorexia = as.numeric(grepl("Anorexia", Categories)),
+         wheeze = as.numeric(grepl("Wheeze", Categories)),
+         weight.change = as.numeric(grepl("Weight.loss.or.weight.gain", Categories)),
+         nausea = as.numeric(grepl("Nausea", Categories)),
+         chest.pain = as.numeric(grepl("Chest.pain", Categories)),
+         palpitation = as.numeric(grepl("Palpitation", Categories)),
+         exercise.intolerance = as.numeric(grepl("Exercise.intolerance", Categories)),
+         dizziness = as.numeric(grepl("Dizziness", Categories))) %>% 
+  # replace NA with 0
+  replace(is.na(.), 0) %>% 
+  select(-c(Categories, report_head))
+
+no_original_report <- clinical_notes_data %>% 
+  pull(report_no) %>% 
+  max()
+```
+
+```{r loading_additional_data, message = FALSE, warning = FALSE, results = 'hide'}
+
+# LABELED SENTENCES BY SIMCLINS
+# Same logic for processing dataset as above. Import labeled data - labeled by NimbleMiner for Dyspnea
+
+labeled_training_notes_file <- file.path(params$data_folder, 'training_notes_NMlabeled_chunk1.csv')
+additional_data <- labeled_training_notes_file %>%
+  readr::read_csv() %>%
+  select(-X1) %>%
+  mutate(Note = tolower(Note)) %>%
+  mutate(report_head = str_detect(Note, "^admission date"))
+
+additional_report_head <- additional_data %>%
+  filter(report_head) %>%
+  select(Note, report_head) %>%
+  mutate(report_no = row_number() + no_original_report) %>%
+  select(-report_head)
+
+clinical_notes_data_additional <- additional_data %>%
+  left_join(additional_report_head, by = c("Note")) %>%
+  mutate(report_no = na.locf(report_no),
+         Note = removeNumbers(Note)) %>%
+  filter(Note != "") %>%
+  mutate(note_processed = str_squish(Note)) %>%
+  transmute(note_processed,
+            dyspnea = as.numeric(Label),
+            report_head,
+            report_no,
+            Label) %>%
+  filter(!report_head) %>%
+  replace(is.na(.), 0) %>%
+  select(-report_head)
+
+no_additional_report <- clinical_notes_data_additional %>%
+  pull(report_no) %>%
+  max()
+
+no_training_report <- no_original_report * 3
+
+```
+
+```{r full_data, message = FALSE, warning = FALSE, results = 'hide'}
+
+# Bind rows of gold standard dataset and simclin dataset
+testing_notes_data_before_sampling <- clinical_notes_data %>% 
+  #bind_rows(clinical_notes_data_additional) %>% 
+  # Additional dataset only has 3 columns, so the rest of the labels will show NAs, replace those NAs with 0.
+  replace(is.na(.), 0) %>% 
+  # The sentence with at least 1 label will have "with_labels" as TRUE
+  mutate(with_labels = if_else(rowSums(.[3:16]) > 0, TRUE, FALSE))
+
+# There are 15,512 in total but only 1,605 with labels
+testing_notes_data_with_labels <- testing_notes_data_before_sampling %>% 
+  filter(with_labels)
+num_testing_notes_data_with_labels <- testing_notes_data_before_sampling %>% 
+  filter(with_labels) %>% 
+  nrow()
+
+# Randomly sample 1,605 * 2 = 3,210 sentences without label for the final dataset
+testing_notes_data_without_labels <- testing_notes_data_before_sampling %>% 
+  filter(!with_labels) %>% 
+  sample_n(num_testing_notes_data_with_labels * 2)
+
+# The final dataset will contain 4,815 rows
+full_testing_notes_data <- testing_notes_data_with_labels %>% 
+  bind_rows(testing_notes_data_without_labels)
+
+# # For report_level analysis
+# full_report_label <- full_clinical_notes_data %>% 
+#   group_by(report_no) %>% 
+#   summarize(sum_dyspnea = sum(dyspnea)) %>%
+#   mutate(dyspnea = if_else(sum_dyspnea > 0, 1, 0)) %>%
+#   select(-starts_with("sum_"))
+
+```
+
+```{r training_data}
+
+# Bind rows of gold standard dataset and simclin dataset
+training_notes_data_before_sampling <- clinical_notes_data_additional %>% 
+  #bind_rows(clinical_notes_data_additional) %>% 
+  # Additional dataset only has 3 columns, so the rest of the labels will show NAs, replace those NAs with 0.
+  replace(is.na(.), 0) %>% 
+  # The sentence with at least 1 label will have "with_labels" as TRUE
+  #mutate(with_labels = if_else(rowSums(.[3:16]) > 0, TRUE, FALSE))
+  dplyr::rename(with_labels = Label) %>%
+  filter(report_no %in% (no_original_report + seq(1, no_training_report)))
+
+# There are 51,278 in total and 18,024 with labels
+training_notes_data_with_labels <- training_notes_data_before_sampling %>% 
+  filter(with_labels)
+num_training_notes_data_with_labels <- training_notes_data_before_sampling %>% 
+  filter(with_labels) %>% 
+  nrow()
+
+training_notes_data_without_labels <- training_notes_data_before_sampling %>% 
+  filter(!with_labels)
+
+# The final dataset will contain 4,815 rows
+full_training_notes_data <- training_notes_data_with_labels %>% 
+  bind_rows(training_notes_data_without_labels)
+```
+
+```{r all_notes}
+full_clinical_notes_data = full_testing_notes_data %>%
+  bind_rows(full_training_notes_data)
+```
+
+```{r collapsed_clinical_notes}
+full_report_label <- full_clinical_notes_data %>% 
+  group_by(report_no) %>% 
+  summarize(sum_dyspnea = sum(dyspnea)) %>%
+  mutate(dyspnea = if_else(sum_dyspnea > 0, 1, 0)) %>%
+  select(-starts_with("sum_"))
+
+full_clinical_notes_with_labels <- full_clinical_notes_data %>% 
+  group_by(report_no) %>% 
+  summarise(note_processed_all = str_c(note_processed, collapse = " ")) %>% 
+  left_join(full_report_label, by = c("report_no"))
+```
+
+
+```{r encoding_keras}
+# Prepare the data and labels
+texts <- full_clinical_notes_data %>% 
+  pull(note_processed)
+labels <- full_clinical_notes_data %>% 
+  pull(dyspnea)
+
+# Max length for each sentence is 10. 
+maxlen <- 20
+max_words <- 10000
+
+# Tokenize words
+tokenizer <- text_tokenizer(num_words = max_words) %>%
+ fit_text_tokenizer(texts)
+sequences <- texts_to_sequences(tokenizer, texts)
+word_index = tokenizer$word_index
+
+data <- pad_sequences(sequences, maxlen = maxlen)
+labels <- as.array(labels)
+```
+
+```{r train_test_split}
+
+training_reports = no_original_report + seq(1, (no_training_report)*0.8)
+validation_reports = max(training_reports) + seq(1, no_original_report)
+test_reports = seq(1, no_original_report)
+
+training_indices <- which(full_clinical_notes_data$report_no %in% training_reports)
+validation_indices <- which(full_clinical_notes_data$report_no %in% validation_reports)
+test_indices <- which(full_clinical_notes_data$report_no %in% test_reports)
+
+x_train <- data[training_indices, ]
+y_train <- labels[training_indices]
+x_val <- data[validation_indices, ]
+y_val <- labels[validation_indices]
+x_test <- data[test_indices, ]
+y_test <- labels[test_indices]
+```
+
+
+```{r lstm}
+maxlen <- 20
+max_features  <- 10000
+
+model_lstm <- keras_model_sequential() %>%
+  layer_embedding(input_dim = max_features, 
+                  output_dim = 32) %>%
+  layer_lstm(units = 32) %>%
+  layer_dense(units = 16, 
+              activation = "relu",
+              kernel_regularizer = regularizer_l2(0.01)) %>% 
+  layer_dropout(0.2) %>% 
+  layer_dense(units = 1, activation = "sigmoid")
+
+model_lstm %>% compile(
+ optimizer = "rmsprop",
+ loss = "binary_crossentropy",
+ metrics = c("acc")
+)
+
+set.seed(1)
+history <- model_lstm %>% fit(
+ x_train, y_train,
+ epochs = 10,
+ batch_size = 64,
+ validation_data = list(x_val, y_val)
+)
+```
+
+```{r lstm_test}
+# Accuracy ~93%%; Loss 0.24
+results_1 = model_lstm %>%
+ evaluate(x_test, y_test)
+```
+
+
+### Chunks of 5 sentences
+
+```{r loading_data5, message = FALSE, warning = FALSE, results = 'hide'}
+chunk_size = 5
+
+# LOADING ORIGINAL DATASET (GOLD STANDARD)
+file_name <- file.path(params$data_folder, 'gold_standard_HF_100_pt_AV.csv')
+
+clinical_notes_raw_data <- file_name %>% 
+  readr::read_csv() %>% 
+  # X1 is the index column, unselect this column
+  select(-X1) %>% 
+  # report_head indicates the start of a note
+  mutate(report_head = str_detect(Note, "admission date"))
+
+new_rows_test = seq(1, ceiling(nrow(clinical_notes_raw_data)/chunk_size), 1)
+test = clinical_notes_raw_data %>%
+    mutate(chunk_id = sort(rep(new_rows_test, chunk_size))[1:nrow(.)]) %>%
+    tidyr::unite(Categories, contains("category")) %>%
+    group_by(chunk_id) %>%
+    summarise(Chunk = str_c(Note, collapse = " "),
+              Chunk_cats = str_c(Categories, collapse = "_") %>%
+                str_replace_all(c("NA_" = "", "_NA" = "")),
+              report_head = Reduce("|", report_head)) %>%
+    mutate(Chunk_cats = ifelse(Chunk_cats == "NA", NA, Chunk_cats)) %>%
+    dplyr::rename("Note" = Chunk, "Categories" = Chunk_cats) 
+
+# report_head contains the column report_no, a unique identifier for each report
+# the report_head dataframe contain report_no, a unique indentifier for each report
+report_head <- test %>% 
+  filter(report_head) %>% 
+  select(Note, report_head) %>% 
+  mutate(report_no = row_number()) %>% 
+  select(-report_head)
+
+clinical_notes_data <- test %>% 
+  # joint with report_head dataframe, report_no show which report each sentence belongs to
+  left_join(report_head, by = c("Note")) %>% 
+  mutate(report_no = na.locf(report_no),
+         # remove all numbers
+         Note = removeNumbers(Note)) %>% 
+  # remove lines with no sentences
+  filter(Note != "") %>% 
+  #tidyr::unite(Categories, contains("category")) %>%
+  #select(-contains("copy")) %>%
+  # remove unnecessary whitespaces
+  mutate(note_processed = str_squish(Note)) %>% 
+  transmute(note_processed,
+            report_head,
+            report_no,
+            Categories) %>%
+  #filter(!report_head) %>% 
+  # Create 14 label columns (one-hot encoding)
+  mutate(dyspnea = as.numeric(grepl("Dyspnea", Categories)),
+         confusions = as.numeric(grepl("Confusion", Categories)),
+         fatique = as.numeric(grepl("Fatigue", Categories)),
+         abdomen.distension = as.numeric(grepl("abdomen.distension", Categories)),
+         cough = as.numeric(grepl("Cough", Categories)),
+         peripheral.edema = as.numeric(grepl("peripheral.edema", Categories)),
+         anorexia = as.numeric(grepl("Anorexia", Categories)),
+         wheeze = as.numeric(grepl("Wheeze", Categories)),
+         weight.change = as.numeric(grepl("Weight.loss.or.weight.gain", Categories)),
+         nausea = as.numeric(grepl("Nausea", Categories)),
+         chest.pain = as.numeric(grepl("Chest.pain", Categories)),
+         palpitation = as.numeric(grepl("Palpitation", Categories)),
+         exercise.intolerance = as.numeric(grepl("Exercise.intolerance", Categories)),
+         dizziness = as.numeric(grepl("Dizziness", Categories))) %>% 
+  # replace NA with 0
+  replace(is.na(.), 0) %>% 
+  select(-c(Categories, report_head))
+
+no_original_report <- clinical_notes_data %>% 
+  pull(report_no) %>% 
+  max()
+```
+
+```{r loading_additional_data5, message = FALSE, warning = FALSE, results = 'hide'}
+
+# LABELED SENTENCES BY SIMCLINS
+# Same logic for processing dataset as above. Import labeled data - labeled by NimbleMiner for Dyspnea
+
+labeled_training_notes_file <- file.path(params$data_folder, paste0('dyspnea_training_notes_NMlabeled_chunk', chunk_size, '.csv'))
+
+additional_data <- labeled_training_notes_file %>%
+  readr::read_csv() %>%
+  #select(-X1) %>%
+  mutate(Note = tolower(Note)) %>%
+  mutate(report_head = str_detect(Note, "admission date"))
+
+additional_report_head <- additional_data %>%
+  filter(report_head) %>%
+  select(Note, report_head) %>%
+  mutate(report_no = row_number() + no_original_report) %>%
+  select(-report_head)
+
+clinical_notes_data_additional <- additional_data %>%
+  left_join(additional_report_head, by = c("Note")) %>%
+  mutate(report_no = na.locf(report_no),
+         Note = removeNumbers(Note)) %>%
+  filter(Note != "") %>%
+  mutate(note_processed = str_squish(Note)) %>%
+  transmute(note_processed,
+            dyspnea = as.numeric(Label),
+            report_head,
+            report_no,
+            Label) %>%
+  #filter(!report_head) %>%
+  replace(is.na(.), 0) #%>% select(-report_head)
+
+no_additional_report <- clinical_notes_data_additional %>%
+  pull(report_no) %>%
+  max()
+
+#no_training_report <- no_original_report * 3
+
+```
+
+```{r full_data5, message = FALSE, warning = FALSE, results = 'hide'}
+
+# Bind rows of gold standard dataset and simclin dataset
+testing_notes_data_before_sampling <- clinical_notes_data %>% 
+  #bind_rows(clinical_notes_data_additional) %>% 
+  # Additional dataset only has 3 columns, so the rest of the labels will show NAs, replace those NAs with 0.
+  replace(is.na(.), 0) %>% 
+  # The sentence with at least 1 label will have "with_labels" as TRUE
+  mutate(with_labels = if_else(rowSums(.[3:16]) > 0, TRUE, FALSE))
+
+# There are 2,652 in total but only 264 with labels
+testing_notes_data_with_labels <- testing_notes_data_before_sampling %>% 
+  filter(with_labels)
+num_testing_notes_data_with_labels <- testing_notes_data_before_sampling %>% 
+  filter(with_labels) %>% 
+  nrow()
+
+# Randomly sample 264 * 2 = 528 sentences without label for the final dataset
+testing_notes_data_without_labels <- testing_notes_data_before_sampling %>% 
+  filter(!with_labels) %>% 
+  sample_n(num_testing_notes_data_with_labels * 2)
+
+# The final dataset will contain 792 rows
+full_testing_notes_data <- testing_notes_data_with_labels %>% 
+  bind_rows(testing_notes_data_without_labels)
+
+# # For report_level analysis
+# full_report_label <- full_clinical_notes_data %>% 
+#   group_by(report_no) %>% 
+#   summarize(sum_dyspnea = sum(dyspnea)) %>%
+#   mutate(dyspnea = if_else(sum_dyspnea > 0, 1, 0)) %>%
+#   select(-starts_with("sum_"))
+
+```
+
+```{r training_data5}
+
+# Bind rows of gold standard dataset and simclin dataset
+training_notes_data_before_sampling <- clinical_notes_data_additional %>% 
+  #bind_rows(clinical_notes_data_additional) %>% 
+  # Additional dataset only has 3 columns, so the rest of the labels will show NAs, replace those NAs with 0.
+  replace(is.na(.), 0) %>% 
+  # The sentence with at least 1 label will have "with_labels" as TRUE
+  #mutate(with_labels = if_else(rowSums(.[3:16]) > 0, TRUE, FALSE))
+  dplyr::rename(with_labels = Label) %>% 
+  #filter(report_no %in% (no_original_report + seq(1, no_training_report)))
+  slice(1:(3 * nrow(testing_notes_data_before_sampling)))
+
+no_training_report = max(training_notes_data_before_sampling$report_no) - no_original_report
+
+# There are 7875 in total and 3275 with labels
+training_notes_data_with_labels <- training_notes_data_before_sampling %>% 
+  filter(with_labels)
+num_training_notes_data_with_labels <- training_notes_data_before_sampling %>% 
+  filter(with_labels) %>% 
+  nrow()
+
+training_notes_data_without_labels <- training_notes_data_before_sampling %>% 
+  filter(!with_labels)
+
+# The final dataset will contain 4,815 rows
+full_training_notes_data <- training_notes_data_with_labels %>% 
+  bind_rows(training_notes_data_without_labels)
+```
+
+```{r all_notes5}
+full_clinical_notes_data = full_testing_notes_data %>%
+  bind_rows(full_training_notes_data)
+```
+
+```{r encoding_keras5}
+# Prepare the data and labels
+texts <- full_clinical_notes_data %>% 
+  pull(note_processed)
+labels <- full_clinical_notes_data %>% 
+  pull(dyspnea)
+
+# Max length for each sentence is 10. 
+maxlen <- 20
+max_words <- 10000
+
+# Tokenize words
+tokenizer <- text_tokenizer(num_words = max_words) %>%
+ fit_text_tokenizer(texts)
+sequences <- texts_to_sequences(tokenizer, texts)
+word_index = tokenizer$word_index
+
+data <- pad_sequences(sequences, maxlen = maxlen)
+labels <- as.array(labels)
+```
+
+```{r train_test_split5}
+
+training_reports = no_original_report + seq(1, (no_training_report)*0.8)
+validation_reports = max(training_reports) + seq(1, no_original_report)
+test_reports = seq(1, no_original_report)
+
+training_indices <- which(full_clinical_notes_data$report_no %in% training_reports)
+validation_indices <- which(full_clinical_notes_data$report_no %in% validation_reports)
+test_indices <- which(full_clinical_notes_data$report_no %in% test_reports)
+
+x_train <- data[training_indices, ]
+y_train <- labels[training_indices]
+x_val <- data[validation_indices, ]
+y_val <- labels[validation_indices]
+x_test <- data[test_indices, ]
+y_test <- labels[test_indices]
+```
+
+
+```{r lstm5}
+maxlen <- 20
+max_features  <- 10000
+
+model_lstm <- keras_model_sequential() %>%
+  layer_embedding(input_dim = max_features, 
+                  output_dim = 32) %>%
+  layer_lstm(units = 32) %>%
+  layer_dense(units = 16, 
+              activation = "relu",
+              kernel_regularizer = regularizer_l2(0.01)) %>% 
+  layer_dropout(0.2) %>% 
+  layer_dense(units = 1, activation = "sigmoid")
+
+model_lstm %>% compile(
+ optimizer = "rmsprop",
+ loss = "binary_crossentropy",
+ metrics = c("acc")
+)
+
+set.seed(1)
+history <- model_lstm %>% fit(
+ x_train, y_train,
+ epochs = 10,
+ batch_size = 64,
+ validation_data = list(x_val, y_val)
+)
+```
+
+```{r lstm_test5}
+# Accuracy ~70%%; Loss 0.85
+results_5 = model_lstm %>%
+ evaluate(x_test, y_test)
+```
+
+
+### Chunks of 10 sentences
+
+```{r loading_data10, message = FALSE, warning = FALSE, results = 'hide'}
+chunk_size = 10
+
+# LOADING ORIGINAL DATASET (GOLD STANDARD)
+file_name <- file.path(params$data_folder, 'gold_standard_HF_100_pt_AV.csv')
+
+clinical_notes_raw_data <- file_name %>% 
+  readr::read_csv() %>% 
+  # X1 is the index column, unselect this column
+  select(-X1) %>% 
+  # report_head indicates the start of a note
+  mutate(report_head = str_detect(Note, "admission date"))
+
+new_rows_test = seq(1, ceiling(nrow(clinical_notes_raw_data)/chunk_size), 1)
+test = clinical_notes_raw_data %>%
+    mutate(chunk_id = sort(rep(new_rows_test, chunk_size))[1:nrow(.)]) %>%
+    tidyr::unite(Categories, contains("category")) %>%
+    group_by(chunk_id) %>%
+    summarise(Chunk = str_c(Note, collapse = " "),
+              Chunk_cats = str_c(Categories, collapse = "_") %>%
+                str_replace_all(c("NA_" = "", "_NA" = "")),
+              report_head = Reduce("|", report_head)) %>%
+    mutate(Chunk_cats = ifelse(Chunk_cats == "NA", NA, Chunk_cats)) %>%
+    dplyr::rename("Note" = Chunk, "Categories" = Chunk_cats) 
+
+# report_head contains the column report_no, a unique identifier for each report
+# the report_head dataframe contain report_no, a unique indentifier for each report
+report_head <- test %>% 
+  filter(report_head) %>% 
+  select(Note, report_head) %>% 
+  mutate(report_no = row_number()) %>% 
+  select(-report_head)
+
+clinical_notes_data <- test %>% 
+  # joint with report_head dataframe, report_no show which report each sentence belongs to
+  left_join(report_head, by = c("Note")) %>% 
+  mutate(report_no = na.locf(report_no),
+         # remove all numbers
+         Note = removeNumbers(Note)) %>% 
+  # remove lines with no sentences
+  filter(Note != "") %>% 
+  #tidyr::unite(Categories, contains("category")) %>%
+  #select(-contains("copy")) %>%
+  # remove unnecessary whitespaces
+  mutate(note_processed = str_squish(Note)) %>% 
+  transmute(note_processed,
+            report_head,
+            report_no,
+            Categories) %>%
+  #filter(!report_head) %>% 
+  # Create 14 label columns (one-hot encoding)
+  mutate(dyspnea = as.numeric(grepl("Dyspnea", Categories)),
+         confusions = as.numeric(grepl("Confusion", Categories)),
+         fatique = as.numeric(grepl("Fatigue", Categories)),
+         abdomen.distension = as.numeric(grepl("abdomen.distension", Categories)),
+         cough = as.numeric(grepl("Cough", Categories)),
+         peripheral.edema = as.numeric(grepl("peripheral.edema", Categories)),
+         anorexia = as.numeric(grepl("Anorexia", Categories)),
+         wheeze = as.numeric(grepl("Wheeze", Categories)),
+         weight.change = as.numeric(grepl("Weight.loss.or.weight.gain", Categories)),
+         nausea = as.numeric(grepl("Nausea", Categories)),
+         chest.pain = as.numeric(grepl("Chest.pain", Categories)),
+         palpitation = as.numeric(grepl("Palpitation", Categories)),
+         exercise.intolerance = as.numeric(grepl("Exercise.intolerance", Categories)),
+         dizziness = as.numeric(grepl("Dizziness", Categories))) %>% 
+  # replace NA with 0
+  replace(is.na(.), 0) %>% 
+  select(-c(Categories, report_head))
+
+no_original_report <- clinical_notes_data %>% 
+  pull(report_no) %>% 
+  max()
+```
+
+```{r loading_additional_data10, message = FALSE, warning = FALSE, results = 'hide'}
+
+# LABELED SENTENCES BY SIMCLINS
+# Same logic for processing dataset as above. Import labeled data - labeled by NimbleMiner for Dyspnea
+
+labeled_training_notes_file <- file.path(params$data_folder, paste0('dyspnea_training_notes_NMlabeled_chunk', chunk_size, '.csv'))
+
+additional_data <- labeled_training_notes_file %>%
+  readr::read_csv() %>%
+  #select(-X1) %>%
+  mutate(Note = tolower(Note)) %>%
+  mutate(report_head = str_detect(Note, "admission date"))
+
+additional_report_head <- additional_data %>%
+  filter(report_head) %>%
+  select(Note, report_head) %>%
+  mutate(report_no = row_number() + no_original_report) %>%
+  select(-report_head)
+
+clinical_notes_data_additional <- additional_data %>%
+  left_join(additional_report_head, by = c("Note")) %>%
+  mutate(report_no = na.locf(report_no),
+         Note = removeNumbers(Note)) %>%
+  filter(Note != "") %>%
+  mutate(note_processed = str_squish(Note)) %>%
+  transmute(note_processed,
+            dyspnea = as.numeric(Label),
+            report_head,
+            report_no,
+            Label) %>%
+  #filter(!report_head) %>%
+  replace(is.na(.), 0) #%>% select(-report_head)
+
+no_additional_report <- clinical_notes_data_additional %>%
+  pull(report_no) %>%
+  max()
+
+#no_training_report <- no_original_report * 3
+
+```
+
+```{r full_data10, message = FALSE, warning = FALSE, results = 'hide'}
+
+# Bind rows of gold standard dataset and simclin dataset
+testing_notes_data_before_sampling <- clinical_notes_data %>% 
+  #bind_rows(clinical_notes_data_additional) %>% 
+  # Additional dataset only has 3 columns, so the rest of the labels will show NAs, replace those NAs with 0.
+  replace(is.na(.), 0) %>% 
+  # The sentence with at least 1 label will have "with_labels" as TRUE
+  mutate(with_labels = if_else(rowSums(.[3:16]) > 0, TRUE, FALSE))
+
+# There are 2,652 in total but only 264 with labels
+testing_notes_data_with_labels <- testing_notes_data_before_sampling %>% 
+  filter(with_labels)
+num_testing_notes_data_with_labels <- testing_notes_data_before_sampling %>% 
+  filter(with_labels) %>% 
+  nrow()
+
+# Randomly sample 264 * 2 = 528 sentences without label for the final dataset
+testing_notes_data_without_labels <- testing_notes_data_before_sampling %>% 
+  filter(!with_labels) %>% 
+  sample_n(num_testing_notes_data_with_labels * 2)
+
+# The final dataset will contain 792 rows
+full_testing_notes_data <- testing_notes_data_with_labels %>% 
+  bind_rows(testing_notes_data_without_labels)
+
+# # For report_level analysis
+# full_report_label <- full_clinical_notes_data %>% 
+#   group_by(report_no) %>% 
+#   summarize(sum_dyspnea = sum(dyspnea)) %>%
+#   mutate(dyspnea = if_else(sum_dyspnea > 0, 1, 0)) %>%
+#   select(-starts_with("sum_"))
+
+```
+
+```{r training_data10}
+
+# Bind rows of gold standard dataset and simclin dataset
+training_notes_data_before_sampling <- clinical_notes_data_additional %>% 
+  #bind_rows(clinical_notes_data_additional) %>% 
+  # Additional dataset only has 3 columns, so the rest of the labels will show NAs, replace those NAs with 0.
+  replace(is.na(.), 0) %>% 
+  # The sentence with at least 1 label will have "with_labels" as TRUE
+  #mutate(with_labels = if_else(rowSums(.[3:16]) > 0, TRUE, FALSE))
+  dplyr::rename(with_labels = Label) %>% 
+  #filter(report_no %in% (no_original_report + seq(1, no_training_report)))
+  slice(1:(3 * nrow(testing_notes_data_before_sampling)))
+
+no_training_report = max(training_notes_data_before_sampling$report_no) - no_original_report
+
+# There are 7875 in total and 3275 with labels
+training_notes_data_with_labels <- training_notes_data_before_sampling %>% 
+  filter(with_labels)
+num_training_notes_data_with_labels <- training_notes_data_before_sampling %>% 
+  filter(with_labels) %>% 
+  nrow()
+
+training_notes_data_without_labels <- training_notes_data_before_sampling %>% 
+  filter(!with_labels)
+
+# The final dataset will contain 4,815 rows
+full_training_notes_data <- training_notes_data_with_labels %>% 
+  bind_rows(training_notes_data_without_labels)
+```
+
+```{r all_notes10}
+full_clinical_notes_data = full_testing_notes_data %>%
+  bind_rows(full_training_notes_data)
+```
+
+```{r encoding_keras10}
+# Prepare the data and labels
+texts <- full_clinical_notes_data %>% 
+  pull(note_processed)
+labels <- full_clinical_notes_data %>% 
+  pull(dyspnea)
+
+# Max length for each sentence is 10. 
+maxlen <- 20
+max_words <- 10000
+
+# Tokenize words
+tokenizer <- text_tokenizer(num_words = max_words) %>%
+ fit_text_tokenizer(texts)
+sequences <- texts_to_sequences(tokenizer, texts)
+word_index = tokenizer$word_index
+
+data <- pad_sequences(sequences, maxlen = maxlen)
+labels <- as.array(labels)
+```
+
+```{r train_test_split10}
+
+training_reports = no_original_report + seq(1, (no_training_report)*0.8)
+validation_reports = max(training_reports) + seq(1, no_original_report)
+test_reports = seq(1, no_original_report)
+
+training_indices <- which(full_clinical_notes_data$report_no %in% training_reports)
+validation_indices <- which(full_clinical_notes_data$report_no %in% validation_reports)
+test_indices <- which(full_clinical_notes_data$report_no %in% test_reports)
+
+x_train <- data[training_indices, ]
+y_train <- labels[training_indices]
+x_val <- data[validation_indices, ]
+y_val <- labels[validation_indices]
+x_test <- data[test_indices, ]
+y_test <- labels[test_indices]
+```
+
+
+```{r lstm10}
+maxlen <- 20
+max_features  <- 10000
+
+model_lstm <- keras_model_sequential() %>%
+  layer_embedding(input_dim = max_features, 
+                  output_dim = 32) %>%
+  layer_lstm(units = 32) %>%
+  layer_dense(units = 16, 
+              activation = "relu",
+              kernel_regularizer = regularizer_l2(0.01)) %>% 
+  layer_dropout(0.2) %>% 
+  layer_dense(units = 1, activation = "sigmoid")
+
+model_lstm %>% compile(
+ optimizer = "rmsprop",
+ loss = "binary_crossentropy",
+ metrics = c("acc")
+)
+
+set.seed(1)
+history <- model_lstm %>% fit(
+ x_train, y_train,
+ epochs = 10,
+ batch_size = 64,
+ validation_data = list(x_val, y_val)
+)
+```
+
+```{r lstm_test10}
+# Accuracy ~63.7%%; Loss 1.07
+results_10 = model_lstm %>%
+ evaluate(x_test, y_test)
+```
+
+
+### Full documents
+
+```{r encoding_kerasfull}
+texts <- full_clinical_notes_with_labels %>% 
+  pull(note_processed_all)
+
+labels <- full_clinical_notes_with_labels %>% 
+  pull(dyspnea)
+
+maxlen <- 100
+max_words <- 10000
+
+tokenizer <- text_tokenizer(num_words = max_words) %>%
+  fit_text_tokenizer(texts)
+sequences <- texts_to_sequences(tokenizer, texts)
+word_index = tokenizer$word_index
+
+data <- pad_sequences(sequences, maxlen = maxlen)
+labels <- as.array(labels)
+```
+
+```{r train_test_splitfull}
+
+training_reports = no_original_report + seq(1, (no_training_report)*0.8)
+validation_reports = max(training_reports) + seq(1, no_original_report)
+test_reports = seq(1, no_original_report)
+
+training_indices <- which(full_clinical_notes_with_labels$report_no %in% training_reports)
+validation_indices <- which(full_clinical_notes_with_labels$report_no %in% validation_reports)
+test_indices <- which(full_clinical_notes_with_labels$report_no %in% test_reports)
+
+x_train <- data[training_indices, ]
+y_train <- labels[training_indices]
+x_val <- data[validation_indices, ]
+y_val <- labels[validation_indices]
+x_test <- data[test_indices, ]
+y_test <- labels[test_indices]
+```
+
+
+```{r lstmfull}
+maxlen <- 100
+max_features  <- 10000
+
+model_lstm <- keras_model_sequential() %>%
+  layer_embedding(input_dim = max_features, 
+                  output_dim = 32) %>%
+  layer_lstm(units = 32) %>%
+  layer_dense(units = 16, 
+              activation = "relu",
+              kernel_regularizer = regularizer_l2(0.01)) %>% 
+  layer_dropout(0.2) %>% 
+  layer_dense(units = 1, activation = "sigmoid")
+
+model_lstm %>% compile(
+ optimizer = "rmsprop",
+ loss = "binary_crossentropy",
+ metrics = c("acc")
+)
+
+set.seed(1)
+history <- model_lstm %>% fit(
+ x_train, y_train,
+ epochs = 10,
+ batch_size = 64,
+ validation_data = list(x_val, y_val)
+)
+```
+
+```{r lstm_testfull}
+# Accuracy ~63.7%%; Loss 1.07
+results_full = model_lstm %>%
+ evaluate(x_test, y_test)
+```
+
+```{r}
+data.frame(Chunk_size = c(1, 5, 10, "Full note"),
+           Accuracy = c(results_1$acc, results_5$acc, results_10$acc, results_full$acc),
+           Loss = c(results_1$loss, results_5$loss, results_10$loss, results_full$loss)) %>%
+  knitr::kable()
+```
