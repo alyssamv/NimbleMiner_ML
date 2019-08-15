@@ -4,7 +4,7 @@ author: "Alyssa Vanderbeek"
 date: "7/29/2019"
 output: html_document
 params:
-  data_folder: "~/Desktop/DSI_NimbleMiner/NimbleMiner_ML/Chunks/data/"
+  data_folder: "~/Desktop/DSI_NimbleMiner/NimbleMiner_ML/data/"
 ---
 
 ```{r loading_packages, , echo = FALSE, message = FALSE, warning = FALSE, results = 'hide'}
@@ -252,6 +252,7 @@ sequences <- texts_to_sequences(tokenizer, texts)
 word_index = tokenizer$word_index
 
 data <- pad_sequences(sequences, maxlen = maxlen)
+data <- data / max_words # standardize data to point values between 0 and 1
 labels <- as.array(labels)
 ```
 
@@ -276,9 +277,9 @@ y_test <- labels[test_indices]
 
 ```{r basic_nn_train_validate, warning = FALSE}
 model_basic_nn <- keras_model_sequential() %>%
-  layer_dense(units = 16, activation = "relu", input_shape = c(20)) %>%
+  layer_dense(units = 16, activation = "tanh", input_shape = c(20)) %>%
   layer_dropout(0.5) %>% 
-  layer_dense(units = 8, activation = "relu") %>%
+  layer_dense(units = 8, activation = "tanh") %>%
   layer_dropout(0.5) %>% 
   layer_dense(units = 1, activation = "sigmoid")
 
@@ -299,18 +300,13 @@ model_basic_nn %>% fit(
 ```
 
 ```{r basic_nn_test_accuracy}
-# Refit after 6 epochs
-# model_basic_nn %>% fit(
-#  x_train,
-#  y_train,
-#  epochs = 20,
-#  batch_size = 16,
-#  validation_data = list(x_val, y_val)
-# )
-
 # Accuracy of ~88%; Loss of ~0.5
 results_1 = model_basic_nn %>%
  evaluate(x_test, y_test)
+results_1
+
+predict_x = model_basic_nn %>% predict_classes(x_test) # predict classes (presence of dyspnea symptoms)
+table(predict_x)
 ```
 
 
