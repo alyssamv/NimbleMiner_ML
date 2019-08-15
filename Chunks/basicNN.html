@@ -198,15 +198,52 @@ $(document).ready(function () {
 
 <div id="sentence-level-prediction" class="section level3">
 <h3>Sentence-level prediction</h3>
+<pre><code>## $loss
+## [1] 0.4713244
+## 
+## $acc
+## [1] 0.8652968</code></pre>
+<pre><code>## predict_x
+##   0   1 
+## 847  29</code></pre>
+<pre><code>## y_test
+##   0   1 
+## 771 105</code></pre>
+<pre><code>##    Accuracy Precision     Recall       F1
+## 1 0.8652968 0.2758621 0.07619048 0.119403</code></pre>
 </div>
 <div id="predictions-for-chunks-of-5-sentences" class="section level3">
 <h3>Predictions for chunks of 5 sentences</h3>
+<pre><code>## predict_x
+##   0   1 
+## 768  24</code></pre>
+<pre><code>## y_test
+##   0   1 
+## 681 111</code></pre>
+<pre><code>##    Accuracy Precision     Recall         F1
+## 1 0.8421717 0.2083333 0.04504505 0.07407407</code></pre>
 </div>
 <div id="predictions-for-chunks-of-10-sentences" class="section level3">
 <h3>Predictions for chunks of 10 sentences</h3>
+<pre><code>## predict_x
+##   0   1 
+## 676   8</code></pre>
+<pre><code>## y_test
+##   0   1 
+## 582 102</code></pre>
+<pre><code>##    Accuracy Precision Recall  F1
+## 1 0.8391813         0      0 NaN</code></pre>
 </div>
 <div id="full-clinical-notes" class="section level3">
 <h3>Full clinical notes</h3>
+<pre><code>## predict_x
+##  0  1 
+##  1 96</code></pre>
+<pre><code>## y_test
+##  0  1 
+## 49 48</code></pre>
+<pre><code>##    Accuracy Precision    Recall        F1
+## 1 0.4845361 0.4895833 0.9791667 0.6527778</code></pre>
 <table>
 <thead>
 <tr class="header">
@@ -218,23 +255,23 @@ $(document).ready(function () {
 <tbody>
 <tr class="odd">
 <td align="left">1</td>
-<td align="right">0.8778539</td>
-<td align="right">0.5561399</td>
+<td align="right">0.8652968</td>
+<td align="right">0.4713244</td>
 </tr>
 <tr class="even">
 <td align="left">5</td>
-<td align="right">0.8409091</td>
-<td align="right">0.9466935</td>
+<td align="right">0.8421717</td>
+<td align="right">1.0688233</td>
 </tr>
 <tr class="odd">
 <td align="left">10</td>
-<td align="right">0.7982456</td>
-<td align="right">3.1069955</td>
+<td align="right">0.8391813</td>
+<td align="right">1.6371062</td>
 </tr>
 <tr class="even">
 <td align="left">Full note</td>
-<td align="right">0.5312500</td>
-<td align="right">7.3355363</td>
+<td align="right">0.4845361</td>
+<td align="right">7.9987047</td>
 </tr>
 </tbody>
 </table>
