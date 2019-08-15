@@ -9,3 +9,5 @@
 data
 .csv
 
+## .RData within Chunks folder
+Chunks/*.RData
