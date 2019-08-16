@@ -4,7 +4,7 @@ author: "Alyssa Vanderbeek"
 date: "8/13/2019"
 output: pdf_document
 params:
-  data_folder: "~/Desktop/DSI_NimbleMiner/NimbleMiner_ML/Chunks/data/"
+  data_folder: "~/Desktop/DSI_NimbleMiner/NimbleMiner_ML/data/"
 ---
 
 ```{r loading_packages, , echo = FALSE, message = FALSE, warning = FALSE, results = 'hide'}
@@ -43,7 +43,7 @@ create_matrix <- function(textColumns, language = "english", minDocFreq = 1,
                           ngramLength = 1, originalMatrix = NULL, removeNumbers = FALSE,
                           removePunctuation = TRUE, removeSparseTerms = 0, removeStopwords = TRUE,
                           stemWords = FALSE, stripWhitespace = TRUE, toLower = TRUE,
-                          weighting = weightTf)
+                          weighting = weightTfIdf)
 {
   
   stem_words <- function(x) {
@@ -317,22 +317,29 @@ full_clinical_notes_with_labels_test <- testing_notes_data_before_sampling %>%
 
 
 ```{r svm_model1}
-corpus_df = training_notes_data_before_sampling
+minWordLength = 3 # minimum number of characters for a word to be included in the DTM
+weight_type = tm::weightTfIdf # type of weighting to use in the DTM
+
+corpus_df = training_notes_data_before_sampling %>%
+  filter(nchar(note_processed) >= minWordLength)
 trainingSize <- round(nrow(corpus_df)*(2/3), 0)
 
 # fix error in package
-tmpfun <- get("create_matrix", envir = asNamespace("RTextTools"))
-environment(create_matrix) <- environment(tmpfun)
-assignInNamespace("create_matrix", create_matrix, ns = "RTextTools")
+#tmpfun <- get("create_matrix", envir = asNamespace("RTextTools"))
+#environment(create_matrix) <- environment(tmpfun)
+#assignInNamespace("create_matrix", create_matrix, ns = "RTextTools")
 
-dtMatrix <- create_matrix(corpus_df$note_processed, toLower = FALSE, removeNumbers = TRUE, #language="he", 
-                          removeStopwords = FALSE, removePunctuation=TRUE, stripWhitespace=TRUE, ngramLength =1)
+# create a document term matrix, which includes word-embedding with n-gram tokenization
+dtMatrix <- RTextTools::create_matrix(corpus_df$note_processed, toLower = FALSE, removeNumbers = TRUE, minWordLength = minWordLength,
+                          removeStopwords = FALSE, removePunctuation = TRUE, stripWhitespace = TRUE,
+                          removeSparseTerms = 0, ngramLength = 1,
+                          weighting = weight_type)
 
 #debug info - print first Note and its most frequently terms
 freqTerms <- findFreqTerms(dtMatrix)
 #print(corpus_df[1,'Note'])
 firtsDoc_freqTerms <- findMostFreqTerms(dtMatrix, 10L)
-#print(firtsDoc_freqTerms[[1]])
+print(firtsDoc_freqTerms[[1]])
 
 #write.csv(freqTerms, file = paste0(app_dir, file_folder, "/freqTerms_", model_type, ".csv"), fileEncoding = "UTF-8", row.names = FALSE)
 #write.csv(firtsDoc_freqTerms[[1]], file = paste0(app_dir, file_folder, "/firtsDoc_freqTerms_", model_type, ".csv"), fileEncoding = "UTF-8", row.names = FALSE)
@@ -393,14 +400,14 @@ print(analytics@algorithm_summary)
 predictionData = testing_notes_data_before_sampling
 
 # create a prediction document term matrix
-predMatrix <- create_matrix(predictionData$note_processed, originalMatrix = dtMatrix, toLower = FALSE, language="en", removeNumbers = TRUE, removeStopwords = FALSE,removePunctuation=TRUE, stripWhitespace=TRUE, ngramLength =1)
+predMatrix <- RTextTools::create_matrix(predictionData$note_processed, originalMatrix = dtMatrix, toLower = FALSE, language = "en", removeNumbers = TRUE, removeStopwords = FALSE, removePunctuation=TRUE, stripWhitespace=TRUE, ngramLength = 1, weighting = weight_type)
 
 pred_freqTerms <- findFreqTerms(predMatrix)
 #write.csv(pred_freqTerms,file=paste0(app_dir,file_folder, "/pred_freqTerms_",model_type,".csv"), fileEncoding="UTF-8", row.names = FALSE)
 
 # create the corresponding container
 predSize = length(predictionData$note_processed)
-predictionContainer <- RTextTools::create_container(predMatrix, labels=rep(0,predSize), testSize = 1:predSize, virgin = FALSE)
+predictionContainer <- RTextTools::create_container(predMatrix, labels = rep(0, predSize), testSize = 1:predSize, virgin = FALSE)
 
 # predict
 #progress$set(message  = "Predicting data", detail = "New data classification..." ,value = 3)
@@ -419,21 +426,26 @@ predictionData[["SVM_LABEL"]] <- as.logical(as.numeric(predictionData[["SVM_LABE
 prevalence1 = sum(as.numeric(corpus_df$with_labels)) / nrow(corpus_df)
 
 pred = factor(as.numeric(predictionData[["SVM_LABEL"]]), levels = c(0, 1))
-
 truth = predictionData$dyspnea
 #select(contains("cat"), contains("copy"))
 
 
 n = sum(truth)
-truth = as.factor(truth)
+#truth = as.factor(truth)
 
-recall1 = caret::recall(pred, truth, relevant = "1")
-prec1 = caret::precision(pred, truth, relevant = "1")
-f1 = caret::F_meas(pred, truth, relevant = "1")
+# recall1 = caret::recall(pred, truth, relevant = "1")
+# prec1 = caret::precision(pred, truth, relevant = "1")
+# f1 = caret::F_meas(pred, truth, relevant = "1")
 n.label1 = sum(as.numeric(predictionData[["SVM_LABEL"]]))
 
-caret::confusionMatrix(data = as.factor(as.numeric(predictionData$SVM_LABEL)), 
-                reference = as.factor(predictionData$dyspnea))
+cm = caret::confusionMatrix(data = pred, 
+                reference = factor(truth, levels = c(0, 1)),
+                positive = "1")
+
+data.frame(Accuracy = cm$overall[["Accuracy"]],
+           Precision = cm$byClass[["Precision"]],
+           Recall = cm$byClass[["Recall"]],
+           F1 = cm$byClass[["F1"]])
 ```
 
 
