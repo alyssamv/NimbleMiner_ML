@@ -1,7 +1,5 @@
 ---
-title: "Word embedding pre-processing"
-author: "Alyssa Vanderbeek"
-date: "8/15/2019"
+title: "Optimizing SVM"
 output: html_document
 params:
   data_folder: "~/Desktop/DSI_NimbleMiner/NimbleMiner_ML/data/"
@@ -30,7 +28,8 @@ pkg <- c("devtools"
         ,"reshape"
         ,"readr"
         ,"zoo"
-        ,"keras")
+        ,"keras"
+        ,"rword2vec")
 invisible(lapply(pkg, library, character.only = TRUE))
 options(warn = 0)
 
@@ -166,44 +165,12 @@ test_Y <- test_notes$with_labels %>% as.vector %>% as.numeric
 
 ```
 
-<!-- ### SVM model with caret -->
-
-<!-- ```{r} -->
-<!-- train_corpus <- VCorpus(VectorSource(train_X)) -->
-<!-- ##Removing Punctuation -->
-<!-- train_corpus <- tm_map(train_corpus, content_transformer(removePunctuation)) -->
-<!-- ##Removing numbers -->
-<!-- train_corpus <- tm_map(train_corpus, removeNumbers) -->
-<!-- ##Converting to lower case -->
-<!-- train_corpus <- tm_map(train_corpus, content_transformer(tolower)) -->
-<!-- ##Removing stop words -->
-<!-- train_corpus <- tm_map(train_corpus, content_transformer(removeWords), stopwords("english")) -->
-<!-- ##Stemming -->
-<!-- train_corpus <- tm_map(train_corpus, stemDocument) -->
-<!-- ##Whitespace -->
-<!-- train_corpus <- tm_map(train_corpus, stripWhitespace) -->
-<!-- # Create Document Term Matrix -->
-<!-- dtm_train <- DocumentTermMatrix(train_corpus) -->
-<!-- train_corpus <- removeSparseTerms(dtm_train, 0.998) -->
-<!-- dtm_train_matrix <- as.matrix(train_corpus) -->
-<!-- dtm_train_matrix <- cbind(dtm_train_matrix, train_Y) -->
-<!-- colnames(dtm_train_matrix)[ncol(dtm_train_matrix)] <- "y" -->
-
-<!-- training_set <- as.data.frame(dtm_train_matrix) -->
-<!-- training_set$y <- as.factor(training_set$y) -->
-<!-- ``` -->
-
-<!-- ```{r} -->
-<!-- svm_caret <- caret::train(y ~.,  -->
-<!--                           data = training_set,  -->
-<!--                           method = 'svmRadial') -->
-
-<!-- ``` -->
 
 
-### SVM model with RTextTools
 
-```{r svm_train}
+### SVM with RTextTools (n-gram tokenization)
+
+```{r rtt_svm_train}
 minWordLength = 3 # minimum number of characters for a word to be included in the DTM
 weight_type = tm::weightTfIdf # type of weighting to use in the DTM: Term Frequency - Inverse Document Weighting
 sparsity = 0 
@@ -247,7 +214,7 @@ print(analytics@algorithm_summary)
 ```
 
 
-```{r svm_predict}
+```{r rtt_svm_predict}
 # create a prediction document term matrix
 predMatrix <- create_matrix(test_X, 
                             originalMatrix = dtMatrix, 
@@ -279,7 +246,7 @@ predictedLabels <- RTextTools::classify_model(predictionContainer, SVM)
 ```
 
 
-```{r metrics}
+```{r rtt_metrics}
 pred = factor(predictedLabels[["SVM_LABEL"]], levels = c(0, 1))
 truth = test_Y
 
@@ -291,12 +258,129 @@ cm = caret::confusionMatrix(data = pred,
                 reference = factor(truth, levels = c(0, 1)),
                 positive = "1")
 
-data.frame(N.True = n.true,
-           N.Predicted = n.predicted,
-           Accuracy = cm$overall[["Accuracy"]],
-           Precision = cm$byClass[["Precision"]],
-           Recall = cm$byClass[["Recall"]],
-           F1 = cm$byClass[["F1"]])
+data.frame(N.True = n.true, # 105
+           N.Predicted = n.predicted, # 501
+           Accuracy = cm$overall[["Accuracy"]], # 0.9654
+           Precision = cm$byClass[["Precision"]], # 0.201
+           Recall = cm$byClass[["Recall"]], # 0.961
+           F1 = cm$byClass[["F1"]]) # 0.333
 ```
 
 
+### SVM with caret (word2vec)
+
+```{r w2v_train_data}
+train_corpus <- VCorpus(VectorSource(train_X))
+##Removing Punctuation
+train_corpus <- tm_map(train_corpus, content_transformer(removePunctuation))
+##Removing numbers
+train_corpus <- tm_map(train_corpus, removeNumbers)
+##Converting to lower case
+train_corpus <- tm_map(train_corpus, content_transformer(tolower))
+##Removing stop words
+train_corpus <- tm_map(train_corpus, content_transformer(removeWords), stopwords("english"))
+##Stemming
+train_corpus <- tm_map(train_corpus, stemDocument)
+##Whitespace
+train_corpus <- tm_map(train_corpus, stripWhitespace)
+# Create Document Term Matrix
+dtm_train <- DocumentTermMatrix(train_corpus)
+train_corpus <- removeSparseTerms(dtm_train, 0.998)
+dtm_train_matrix <- as.matrix(train_corpus)
+dtm_train_matrix <- cbind(dtm_train_matrix, train_Y)
+colnames(dtm_train_matrix)[ncol(dtm_train_matrix)] <- "y"
+
+training_set <- as.data.frame(dtm_train_matrix)
+training_set$y <- as.factor(training_set$y)
+```
+
+```{r}
+svm_caret <- caret::train(y ~.,
+                          data = training_set,
+                          method = 'svmRadial')
+
+```
+
+```{r}
+# following along with this blog post: https://www.r-bloggers.com/word-embeddings-with-keras/
+
+skipgrams_generator <- function(text, tokenizer, window_size, negative_samples) {
+    gen <- texts_to_sequences_generator(tokenizer, sample(text))
+    skip <- reticulate::iter_next(gen) %>%
+      skipgrams(
+        vocabulary_size = tokenizer$num_words, 
+        window_size = window_size, 
+        negative_samples = 1
+      )
+    x <- transpose(skip$couples) %>% map(. %>% unlist %>% as.matrix(ncol = 1))
+    y <- skip$labels %>% as.matrix(ncol = 1)
+    list(inputs = x, targets = y)
+}
+# Max length for each sentence is 10. 
+maxlen <- 20
+max_words <- 10000
+
+# Tokenize words
+tokenizer <- text_tokenizer(num_words = max_words) %>%
+ fit_text_tokenizer(train_X)
+
+embedding_size <- 128  # Dimension of the embedding vector.
+skip_window <- 2       # How many words to consider left and right.
+num_sampled <- 1       # Number of negative examples to sample for each word.
+
+input_target <- layer_input(shape = 1)
+input_context <- layer_input(shape = 1)
+
+embedding <- layer_embedding(
+  input_dim = tokenizer$num_words + 1, 
+  output_dim = embedding_size, 
+  input_length = 1, 
+  name = "embedding"
+)
+
+target_vector <- input_target %>% 
+  embedding() %>% 
+  layer_flatten()
+
+context_vector <- input_context %>%
+  embedding() %>%
+  layer_flatten()
+
+dot_product <- layer_dot(list(target_vector, context_vector), axes = 1)
+output <- layer_dense(dot_product, units = 1, activation = "sigmoid")
+
+model <- keras_model(list(input_target, input_context), output)
+model %>% compile(loss = "binary_crossentropy", optimizer = "adam")
+
+summary(model)
+
+generated = skipgrams_generator(train_X, tokenizer, skip_window, negative_samples)
+
+model %>%
+  keras::fit_generator(.,
+                       skipgrams_generator(train_X, tokenizer, skip_window, negative_samples),
+                       steps_per_epoch = 1000,
+                       epochs = 1)
+
+embedding_matrix <- get_weights(model)[[1]]
+
+words <- data.frame(
+  word = names(tokenizer$word_index), 
+  id = as.integer(unlist(tokenizer$word_index))
+) %>%
+  filter(id <= tokenizer$num_words) %>%
+  arrange(id)
+
+row.names(embedding_matrix) <- c("UNK", as.character(words$word))
+
+# similar terms based on cosine similarity
+find_similar_words <- function(word, embedding_matrix, n = 10) {
+  similarities <- embedding_matrix[word, , drop = FALSE] %>%
+    sim2(embedding_matrix, y = ., method = "cosine")
+  similarities[,1] %>% sort(decreasing = TRUE) %>% head(n)
+}
+
+find_similar_words("dyspnea", embedding_matrix)
+```
+
+I suspect the SVM has low precision is because it cannot identify words that are appropriately related?
