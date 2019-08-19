@@ -34,7 +34,7 @@ invisible(lapply(pkg, library, character.only = TRUE))
 options(warn = 0)
 ```
 
-```{r create_matrixfn, echo=FALSE}
+```{r create_matrixfn, echo=FALSE, eval = FALSE}
 ###############################################################################################
 # Function create_matrix - runtime fix small error of create_matrix from RTextTools package
 ###############################################################################################
@@ -43,7 +43,7 @@ create_matrix <- function(textColumns, language = "english", minDocFreq = 1,
                           ngramLength = 1, originalMatrix = NULL, removeNumbers = FALSE,
                           removePunctuation = TRUE, removeSparseTerms = 0, removeStopwords = TRUE,
                           stemWords = FALSE, stripWhitespace = TRUE, toLower = TRUE,
-                          weighting = weightTfIdf)
+                          weighting = weightTf)
 {
   
   stem_words <- function(x) {
@@ -312,6 +312,15 @@ full_clinical_notes_with_labels_test <- testing_notes_data_before_sampling %>%
   group_by(report_no) %>% 
   summarise(note_processed_all = str_c(note_processed, collapse = " ")) %>% 
   left_join(full_report_label_test, by = c("report_no"))
+
+rm(full_report_label_test, 
+   full_testing_notes_data,
+   report_head,
+   testing_notes_data_with_labels,
+   testing_notes_data_without_labels,
+   training_notes_data_with_labels,
+   training_notes_data_without_labels,
+   additional_report_head)
 ```
 
 
@@ -319,9 +328,10 @@ full_clinical_notes_with_labels_test <- testing_notes_data_before_sampling %>%
 ```{r svm_model1}
 minWordLength = 3 # minimum number of characters for a word to be included in the DTM
 weight_type = tm::weightTfIdf # type of weighting to use in the DTM
+sparsity = 0
 
-corpus_df = training_notes_data_before_sampling %>%
-  filter(nchar(note_processed) >= minWordLength)
+corpus_df = training_notes_data_before_sampling
+
 trainingSize <- round(nrow(corpus_df)*(2/3), 0)
 
 # fix error in package
@@ -330,10 +340,17 @@ trainingSize <- round(nrow(corpus_df)*(2/3), 0)
 #assignInNamespace("create_matrix", create_matrix, ns = "RTextTools")
 
 # create a document term matrix, which includes word-embedding with n-gram tokenization
-dtMatrix <- RTextTools::create_matrix(corpus_df$note_processed, toLower = FALSE, removeNumbers = TRUE, minWordLength = minWordLength,
-                          removeStopwords = FALSE, removePunctuation = TRUE, stripWhitespace = TRUE,
-                          removeSparseTerms = 0, ngramLength = 1,
-                          weighting = weight_type)
+dtMatrix <- create_matrix(corpus_df$note_processed, 
+                                      toLower = TRUE, 
+                                      removeNumbers = TRUE, 
+                                      minWordLength = minWordLength,
+                                      removeStopwords = TRUE, 
+                                      removePunctuation = TRUE, 
+                                      stripWhitespace = TRUE,
+                                      stemWords = TRUE,
+                                      removeSparseTerms = sparsity, 
+                                      ngramLength = 1,
+                                      weighting = weight_type)
 
 #debug info - print first Note and its most frequently terms
 freqTerms <- findFreqTerms(dtMatrix)
@@ -346,52 +363,35 @@ print(firtsDoc_freqTerms[[1]])
 
 # Configure the training data
 #progress$set(detail = paste0("Configure the training data with ",trainingSize," notes.") ,value = 3)
-container <- RTextTools::create_container(dtMatrix, as.numeric(as.vector(corpus_df$with_labels)), trainSize = 1:trainingSize, testSize = (trainingSize + 1):nrow(corpus_df), virgin = FALSE)
+container <- RTextTools::create_container(dtMatrix, 
+                                          labels = as.numeric(as.vector(corpus_df$with_labels)), 
+                                          trainSize = 1:trainingSize, 
+                                          testSize = (trainingSize + 1):nrow(corpus_df), 
+                                          virgin = FALSE)
 
-set.seed(1)             
-radial.tune <- tune.svm(x = container@training_matrix, 
-                        y = container@training_codes, 
-                        kernel = "radial", 
-                        cost = 100,
-                        #gamma = 0.5,
-                        probability = TRUE)
-summary(radial.tune)
+# set.seed(1)             
+# radial.tune <- tune.svm(x = container@training_matrix, 
+#                         y = container@training_codes, 
+#                         kernel = "radial", 
+#                         cost = 100,
+#                         #gamma = 0.5,
+#                         probability = TRUE)
+# summary(radial.tune)
+# 
+# model <- radial.tune$best.model
+# summary(model)
 
-model <- radial.tune$best.model
-summary(model)
-
-#pred.radial <- predict(best.radial, newdata = dat[-rowTrain,])
-
-
-
-# svm_method_parameter <- "C-classification"
-# svm_cost_parameter <- 4
-# svm_gamma_parameter <- 1/nrow()
-# svm_kernel_parameter <- "radial"
-# parameters_of_model <- paste0("Method: SVM", ", Cost = ", svm_cost_parameter, ", Type = ", svm_method_parameter, ", Kernel = ", svm_kernel_parameter)
-# #progress$set(detail = paste0("Training the model...") ,value = 4)
-# model <- RTextTools::train_model(container, "SVM", kernel = svm_kernel_parameter, cost = svm_cost_parameter, method = svm_method_parameter, gamma = svm_gamma_parameter)
-
-#progress$set(detail = "Save the model..." ,value = 5)
-#save(model,file=paste0(app_dir, file_folder, "/trainedModel_",model_type,".Rd"))
-#save(dtMatrix,file=paste0(app_dir, file_folder, "/originalMatrix.Rd"))
-
-validationData <- corpus_df[(trainingSize + 1):(nrow(corpus_df)), ]
-#rm(corpus_df)
-
-#progress$set(detail = "Test the model..." ,value = 6)
-validatedLabels <- RTextTools::classify_model(container, model)
-validationData$validatedLabels <- validatedLabels
-
+SVM <- train_model(container, "SVM",
+                   cost = 4,
+                   kernel = "radial")
+SVM_CLASSIFY <- classify_model(container, SVM)
 
 # VIEW THE RESULTS BY CREATING ANALYTICS
-analytics <- RTextTools::create_analytics(container, validatedLabels)
+analytics <- RTextTools::create_analytics(container, SVM_CLASSIFY)
 #algorythms_summary_table  <- DT::renderDataTable(analytics@algorithm_summary,  escape = FALSE)
 print(analytics@algorithm_summary)
-# precision_results <- paste0("TRUE -  ",analytics@algorithm_summary["1","SVM_PRECISION"],", FALSE - ",analytics@algorithm_summary["0","SVM_PRECISION"])
-# recall_results <- paste0("TRUE -  ",analytics@algorithm_summary["1","SVM_RECALL"],", FALSE - ",analytics@algorithm_summary["0","SVM_RECALL"])
-# 
-# validation_results_of_model <- paste0("Precision: ", precision_results, "; Recall: ", recall_results)
+
+#SVM <- cross_validate(container, nfold = 4, "SVM")
 
 ```
 
@@ -400,18 +400,31 @@ print(analytics@algorithm_summary)
 predictionData = testing_notes_data_before_sampling
 
 # create a prediction document term matrix
-predMatrix <- RTextTools::create_matrix(predictionData$note_processed, originalMatrix = dtMatrix, toLower = FALSE, language = "en", removeNumbers = TRUE, removeStopwords = FALSE, removePunctuation=TRUE, stripWhitespace=TRUE, ngramLength = 1, weighting = weight_type)
+predMatrix <- create_matrix(predictionData$note_processed, 
+                                        originalMatrix = dtMatrix, 
+                                        toLower = FALSE, 
+                                        language = "en", 
+                                        removeNumbers = TRUE, 
+                                        removeStopwords = FALSE, 
+                                        removePunctuation = TRUE, 
+                                        stripWhitespace = TRUE, 
+                                        removeSparseTerms = sparsity, 
+                                        ngramLength = 1, 
+                                        weighting = weight_type)
 
 pred_freqTerms <- findFreqTerms(predMatrix)
-#write.csv(pred_freqTerms,file=paste0(app_dir,file_folder, "/pred_freqTerms_",model_type,".csv"), fileEncoding="UTF-8", row.names = FALSE)
+
 
 # create the corresponding container
 predSize = length(predictionData$note_processed)
-predictionContainer <- RTextTools::create_container(predMatrix, labels = rep(0, predSize), testSize = 1:predSize, virgin = FALSE)
+predictionContainer <- RTextTools::create_container(predMatrix, 
+                                                    labels = rep(0, predSize), 
+                                                    testSize = 1:predSize, 
+                                                    virgin = FALSE)
 
 # predict
 #progress$set(message  = "Predicting data", detail = "New data classification..." ,value = 3)
-predictedLabels <- RTextTools::classify_model(predictionContainer, model)
+predictedLabels <- RTextTools::classify_model(predictionContainer, SVM)
 
 #progress$close()
  # predict by SVM (from RTextTool package)
@@ -433,9 +446,9 @@ truth = predictionData$dyspnea
 n = sum(truth)
 #truth = as.factor(truth)
 
-# recall1 = caret::recall(pred, truth, relevant = "1")
-# prec1 = caret::precision(pred, truth, relevant = "1")
-# f1 = caret::F_meas(pred, truth, relevant = "1")
+# recall1 = caret::recall(pred, factor(truth, levels = c(0, 1)), relevant = "1")
+# prec1 = caret::precision(pred, factor(truth, levels = c(0, 1)), relevant = "1")
+# f1 = caret::F_meas(pred, factor(truth, levels = c(0, 1)), relevant = "1")
 n.label1 = sum(as.numeric(predictionData[["SVM_LABEL"]]))
 
 cm = caret::confusionMatrix(data = pred, 

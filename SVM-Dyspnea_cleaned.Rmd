@@ -1,0 +1,302 @@
+---
+title: "Word embedding pre-processing"
+author: "Alyssa Vanderbeek"
+date: "8/15/2019"
+output: html_document
+params:
+  data_folder: "~/Desktop/DSI_NimbleMiner/NimbleMiner_ML/data/"
+---
+
+Based on model analysis for different chunk sizes, sentence-level prediction was best.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+pkg <- c("devtools"
+        ,"pander"
+        ,"knitr"
+        ,"dplyr"
+        ,"tidyr"
+        ,"stringr"
+        ,"lubridate"
+        ,"purrr"
+        ,"DT"
+        ,"tidytext"
+        ,"ggplot2"
+        ,"textstem"
+        ,"tm"
+        ,"splitstackshape"
+        ,"text2vec"
+        ,"reshape"
+        ,"readr"
+        ,"zoo"
+        ,"keras")
+invisible(lapply(pkg, library, character.only = TRUE))
+options(warn = 0)
+
+category = "Dyspnea" # remaining consistent with prior development
+source("~/Desktop/DSI_NimbleMiner/NimbleMiner_ML/create_matrix_FIX.R")
+```
+
+### Data import
+
+```{r gold_standard}
+# LOADING ORIGINAL DATASET (GOLD STANDARD)
+gold_standard <- file.path(params$data_folder, 'gold_standard_HF_100_pt_AV.csv')
+
+clinical_notes_raw_data <- gold_standard %>% 
+  readr::read_csv() %>% 
+  # X1 is the index column, unselect this column
+  select(-X1) %>% 
+  # report_head indicates the start of a note
+  mutate(report_head = str_detect(Note, "^admission date"))
+
+# report_head contains the column report_no, a unique identifier for each report
+# the report_head dataframe contain report_no, a unique indentifier for each report
+report_head <- clinical_notes_raw_data %>%
+  filter(report_head) %>%
+  select(Note, report_head) %>%
+  mutate(report_no = row_number()) %>%
+  select(-report_head)
+
+test_notes <- clinical_notes_raw_data %>% 
+  # joint with report_head dataframe, report_no show which report each sentence belongs to
+  left_join(report_head, by = c("Note")) %>% 
+  mutate(report_no = na.locf(report_no),
+         Note = tolower(Note), ####### make all lowercase
+         Note = removeNumbers(Note)) %>%  ####### remove all numbers
+  filter(Note != "") %>%   ####### remove lines with no sentences
+  tidyr::unite(Categories, contains("category")) %>%
+  select(-contains("copy")) %>%
+  # remove unnecessary whitespaces
+  mutate(note_processed = str_squish(Note)) %>% 
+  transmute(note_processed,
+            report_head,
+            report_no,
+            Categories) %>%
+  filter(!report_head) %>% 
+  # Create 14 label columns (one-hot encoding)
+  mutate(dyspnea = as.numeric(grepl("Dyspnea", Categories)),
+         confusions = as.numeric(grepl("Confusion", Categories)),
+         fatique = as.numeric(grepl("Fatigue", Categories)),
+         abdomen.distension = as.numeric(grepl("abdomen.distension", Categories)),
+         cough = as.numeric(grepl("Cough", Categories)),
+         peripheral.edema = as.numeric(grepl("peripheral.edema", Categories)),
+         anorexia = as.numeric(grepl("Anorexia", Categories)),
+         wheeze = as.numeric(grepl("Wheeze", Categories)),
+         weight.change = as.numeric(grepl("Weight.loss.or.weight.gain", Categories)),
+         nausea = as.numeric(grepl("Nausea", Categories)),
+         chest.pain = as.numeric(grepl("Chest.pain", Categories)),
+         palpitation = as.numeric(grepl("Palpitation", Categories)),
+         exercise.intolerance = as.numeric(grepl("Exercise.intolerance", Categories)),
+         dizziness = as.numeric(grepl("Dizziness", Categories))) %>% 
+  # replace NA with 0
+  replace(is.na(.), 0) %>% 
+  select(-c(Categories, report_head)) %>%
+  mutate(with_labels = as.logical(dyspnea))
+
+rm(report_head)
+
+no_original_report = max(test_notes$report_no) # 95 notes in gold standard
+
+```
+
+
+```{r labeled_training_notes}
+labeled_data_path <- file.path(params$data_folder, 'training_notes_NMlabeled_chunk1.csv')
+
+training_notes_raw <- labeled_data_path %>%
+  readr::read_csv() %>%
+  select(-X1) %>%
+  mutate(Note = tolower(Note), ####### all lowercase
+         report_head = str_detect(Note, "^admission date"))
+
+training_report_head <- training_notes_raw %>%
+  filter(report_head) %>%
+  select(Note, report_head) %>%
+  mutate(report_no = row_number() + no_original_report) %>%
+  select(-report_head)
+
+training_notes <- training_notes_raw %>%
+  left_join(training_report_head, by = c("Note")) %>%
+  mutate(report_no = na.locf(report_no),
+         Note = removeNumbers(Note)) %>% ####### remove numbers
+  filter(Note != "") %>% ####### remove blank rows
+  mutate(note_processed = str_squish(Note)) %>%
+  transmute(note_processed,
+            dyspnea = as.numeric(Label),
+            report_head,
+            report_no,
+            Label) %>%
+  filter(!report_head) %>%
+  replace(is.na(.), 0) %>%
+  select(-report_head)
+
+training_notes <- training_notes[1:(nrow(test_notes)*2), ]
+
+rm(training_report_head, no_original_report)
+
+```
+
+
+```{r train_test}
+# # number of reports in test set
+# no_original_report <- test_notes %>%
+#   pull(report_no) %>%
+#   max()
+# 
+# # number of reports in labeled data set
+# no_additional_report <- training_notes %>%
+#   pull(report_no) %>%
+#   max()
+# 
+# # number of reports to be included in training set
+# no_training_report <- no_original_report * 3
+# 
+# training = training_notes %>% 
+#   filter(report_no %in% (no_original_report+(1:no_training_report)))
+
+train_X <- training_notes$note_processed
+train_Y <- training_notes$Label %>% as.vector %>% as.numeric
+trainingSize <- round(length(train_X)*(2/3), 0)
+
+test_X <- test_notes$note_processed
+test_Y <- test_notes$with_labels %>% as.vector %>% as.numeric
+
+
+```
+
+<!-- ### SVM model with caret -->
+
+<!-- ```{r} -->
+<!-- train_corpus <- VCorpus(VectorSource(train_X)) -->
+<!-- ##Removing Punctuation -->
+<!-- train_corpus <- tm_map(train_corpus, content_transformer(removePunctuation)) -->
+<!-- ##Removing numbers -->
+<!-- train_corpus <- tm_map(train_corpus, removeNumbers) -->
+<!-- ##Converting to lower case -->
+<!-- train_corpus <- tm_map(train_corpus, content_transformer(tolower)) -->
+<!-- ##Removing stop words -->
+<!-- train_corpus <- tm_map(train_corpus, content_transformer(removeWords), stopwords("english")) -->
+<!-- ##Stemming -->
+<!-- train_corpus <- tm_map(train_corpus, stemDocument) -->
+<!-- ##Whitespace -->
+<!-- train_corpus <- tm_map(train_corpus, stripWhitespace) -->
+<!-- # Create Document Term Matrix -->
+<!-- dtm_train <- DocumentTermMatrix(train_corpus) -->
+<!-- train_corpus <- removeSparseTerms(dtm_train, 0.998) -->
+<!-- dtm_train_matrix <- as.matrix(train_corpus) -->
+<!-- dtm_train_matrix <- cbind(dtm_train_matrix, train_Y) -->
+<!-- colnames(dtm_train_matrix)[ncol(dtm_train_matrix)] <- "y" -->
+
+<!-- training_set <- as.data.frame(dtm_train_matrix) -->
+<!-- training_set$y <- as.factor(training_set$y) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- svm_caret <- caret::train(y ~.,  -->
+<!--                           data = training_set,  -->
+<!--                           method = 'svmRadial') -->
+
+<!-- ``` -->
+
+
+### SVM model with RTextTools
+
+```{r svm_train}
+minWordLength = 3 # minimum number of characters for a word to be included in the DTM
+weight_type = tm::weightTfIdf # type of weighting to use in the DTM: Term Frequency - Inverse Document Weighting
+sparsity = 0 
+
+# create a document term matrix, which includes word-embedding with n-gram tokenization
+dtMatrix <- create_matrix(train_X, 
+                          toLower = FALSE, 
+                          removeNumbers = TRUE, 
+                          minWordLength = minWordLength,
+                          removeStopwords = FALSE, # no impact on metrics
+                          removePunctuation = TRUE, 
+                          stripWhitespace = TRUE,
+                          stemWords = TRUE, # set to TRUE improves metrics
+                          removeSparseTerms = sparsity, 
+                          ngramLength = 1,
+                          weighting = weight_type)
+
+#debug info - print first Note and its most frequently terms
+freqTerms <- findFreqTerms(dtMatrix)
+firtsDoc_freqTerms <- findMostFreqTerms(dtMatrix, 10L)
+print(firtsDoc_freqTerms[[1]])
+
+
+container <- RTextTools::create_container(dtMatrix, 
+                                          labels = train_Y, 
+                                          trainSize = 1:trainingSize, 
+                                          testSize = (trainingSize + 1):length(train_X), 
+                                          virgin = FALSE)
+
+
+SVM <- RTextTools::train_model(container, "SVM",
+                               cost = 100, # higher cost is better, but marginal improvement above 100
+                               kernel = "radial") # radial kernel allows for more flexibility
+
+SVM_CLASSIFY <- RTextTools::classify_model(container, SVM)
+
+# VIEW THE RESULTS BY CREATING ANALYTICS
+analytics <- RTextTools::create_analytics(container, SVM_CLASSIFY)
+print(analytics@algorithm_summary)
+
+```
+
+
+```{r svm_predict}
+# create a prediction document term matrix
+predMatrix <- create_matrix(test_X, 
+                            originalMatrix = dtMatrix, 
+                            toLower = FALSE, 
+                            removeNumbers = TRUE, 
+                            removeStopwords = FALSE, 
+                            removePunctuation = TRUE, 
+                            stripWhitespace = TRUE, 
+                            stemWords = TRUE,
+                            removeSparseTerms = sparsity, 
+                            ngramLength = 1, 
+                            weighting = weight_type)
+
+pred_freqTerms <- findFreqTerms(predMatrix)
+firtsDoc_freqTerms_pred <- findMostFreqTerms(predMatrix, 10L)
+print(firtsDoc_freqTerms_pred[[1]])
+
+
+# create the corresponding container
+predSize = length(test_X)
+predictionContainer <- RTextTools::create_container(predMatrix, 
+                                                    labels = rep(0, predSize), 
+                                                    testSize = 1:predSize, 
+                                                    virgin = FALSE)
+
+# predict on the test data
+predictedLabels <- RTextTools::classify_model(predictionContainer, SVM)
+
+```
+
+
+```{r metrics}
+pred = factor(predictedLabels[["SVM_LABEL"]], levels = c(0, 1))
+truth = test_Y
+
+n.true = sum(truth) # number of true labels
+n.predicted = sum(as.numeric(predictedLabels[["SVM_LABEL"]]) - 1) # number of predicted labels
+
+# Confusion matrix to get prediction metrics
+cm = caret::confusionMatrix(data = pred, 
+                reference = factor(truth, levels = c(0, 1)),
+                positive = "1")
+
+data.frame(N.True = n.true,
+           N.Predicted = n.predicted,
+           Accuracy = cm$overall[["Accuracy"]],
+           Precision = cm$byClass[["Precision"]],
+           Recall = cm$byClass[["Recall"]],
+           F1 = cm$byClass[["F1"]])
+```
+
+
