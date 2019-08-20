@@ -248,3 +248,37 @@ data.frame(N.True = n.true, # 105
            F1 = cm$byClass[["F1"]]) # 0.331
 ```
 
+
+### LSTM with GloVe word embedding
+
+```{r}
+# resource: http://text2vec.org/glove.html
+
+library(text2vec)
+
+# Create iterator over tokens
+tokens <- space_tokenizer(texts)
+# Create vocabulary. Terms will be unigrams (simple words).
+it = itoken(tokens, progressbar = FALSE)
+vocab <- create_vocabulary(it)
+
+vocab <- prune_vocabulary(vocab, term_count_min = 5L)
+
+# Use our filtered vocabulary
+vectorizer <- vocab_vectorizer(vocab)
+# use window of 5 for context words
+tcm <- create_tcm(it, vectorizer, skip_grams_window = 5L)
+
+glove = GlobalVectors$new(word_vectors_size = 50, vocabulary = vocab, x_max = 10)
+wv_main = fit_transform(tcm, glove, n_iter = 20)
+
+wv_context <- glove$components
+
+word_vectors = wv_main + t(wv_context)
+
+dysp <- word_vectors["dyspnea", , drop = FALSE] 
+# find related terms 
+cos_sim = sim2(x = word_vectors, y = dysp, method = "cosine", norm = "l2")
+head(sort(cos_sim[,1], decreasing = TRUE), 10) # looks good
+```
+
