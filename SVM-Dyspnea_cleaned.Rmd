@@ -29,7 +29,8 @@ pkg <- c("devtools"
         ,"readr"
         ,"zoo"
         ,"keras"
-        ,"rword2vec")
+        ,"rword2vec"
+        ,"reticulate")
 invisible(lapply(pkg, library, character.only = TRUE))
 options(warn = 0)
 
@@ -267,46 +268,54 @@ data.frame(N.True = n.true, # 105
 ```
 
 
-### SVM with caret (word2vec)
+<!-- ### SVM with caret (word2vec) -->
 
-```{r w2v_train_data}
-train_corpus <- VCorpus(VectorSource(train_X))
-##Removing Punctuation
-train_corpus <- tm_map(train_corpus, content_transformer(removePunctuation))
-##Removing numbers
-train_corpus <- tm_map(train_corpus, removeNumbers)
-##Converting to lower case
-train_corpus <- tm_map(train_corpus, content_transformer(tolower))
-##Removing stop words
-train_corpus <- tm_map(train_corpus, content_transformer(removeWords), stopwords("english"))
-##Stemming
-train_corpus <- tm_map(train_corpus, stemDocument)
-##Whitespace
-train_corpus <- tm_map(train_corpus, stripWhitespace)
-# Create Document Term Matrix
-dtm_train <- DocumentTermMatrix(train_corpus)
-train_corpus <- removeSparseTerms(dtm_train, 0.998)
-dtm_train_matrix <- as.matrix(train_corpus)
-dtm_train_matrix <- cbind(dtm_train_matrix, train_Y)
-colnames(dtm_train_matrix)[ncol(dtm_train_matrix)] <- "y"
+<!-- ```{r w2v_train_data} -->
+<!-- train_corpus <- VCorpus(VectorSource(train_X)) -->
+<!-- ##Removing Punctuation -->
+<!-- train_corpus <- tm_map(train_corpus, content_transformer(removePunctuation)) -->
+<!-- ##Removing numbers -->
+<!-- train_corpus <- tm_map(train_corpus, removeNumbers) -->
+<!-- ##Converting to lower case -->
+<!-- train_corpus <- tm_map(train_corpus, content_transformer(tolower)) -->
+<!-- ##Removing stop words -->
+<!-- train_corpus <- tm_map(train_corpus, content_transformer(removeWords), stopwords("english")) -->
+<!-- ##Stemming -->
+<!-- train_corpus <- tm_map(train_corpus, stemDocument) -->
+<!-- ##Whitespace -->
+<!-- train_corpus <- tm_map(train_corpus, stripWhitespace) -->
+<!-- # Create Document Term Matrix -->
+<!-- dtm_train <- DocumentTermMatrix(train_corpus) -->
+<!-- train_corpus <- removeSparseTerms(dtm_train, 0.998) -->
+<!-- dtm_train_matrix <- as.matrix(train_corpus) -->
+<!-- dtm_train_matrix <- cbind(dtm_train_matrix, train_Y) -->
+<!-- colnames(dtm_train_matrix)[ncol(dtm_train_matrix)] <- "y" -->
 
-training_set <- as.data.frame(dtm_train_matrix)
-training_set$y <- as.factor(training_set$y)
-```
+<!-- training_set <- as.data.frame(dtm_train_matrix) -->
+<!-- training_set$y <- as.factor(training_set$y) -->
+<!-- ``` -->
 
-```{r}
-svm_caret <- caret::train(y ~.,
-                          data = training_set,
-                          method = 'svmRadial')
+<!-- ```{r} -->
+<!-- svm_caret <- caret::train(y ~., -->
+<!--                           data = training_set, -->
+<!--                           method = 'svmRadial', -->
+<!--                           trControl = trainControl(method = "cv"), -->
+<!--                           tuneGrid = data.frame( -->
+<!--                             C = 10^(seq(-5, 2, len = 5)), -->
+<!--                             sigma = exp(seq(-8, -3, len = 5)) -->
+<!--                                                 ) -->
+<!--                           ) -->
 
-```
+<!-- ``` -->
 
 ```{r}
 # following along with this blog post: https://www.r-bloggers.com/word-embeddings-with-keras/
 
 skipgrams_generator <- function(text, tokenizer, window_size, negative_samples) {
-    gen <- texts_to_sequences_generator(tokenizer, sample(text))
-    skip <- reticulate::iter_next(gen) %>%
+  gen <- texts_to_sequences_generator(tokenizer, sample(text))
+  
+  function() {
+    skip <- iter_next(gen) %>%
       skipgrams(
         vocabulary_size = tokenizer$num_words, 
         window_size = window_size, 
@@ -314,8 +323,17 @@ skipgrams_generator <- function(text, tokenizer, window_size, negative_samples) 
       )
     x <- transpose(skip$couples) %>% map(. %>% unlist %>% as.matrix(ncol = 1))
     y <- skip$labels %>% as.matrix(ncol = 1)
-    list(inputs = x, targets = y)
+    list(x, y)
+  }
 }
+
+sampling_generator <- function(X_data, Y_data, batch_size) {
+  function() {
+    rows <- sample(1:nrow(X_data), batch_size, replace = TRUE)
+    list(X_data[rows,], Y_data[rows,])
+  }
+}
+
 # Max length for each sentence is 10. 
 maxlen <- 20
 max_words <- 10000
@@ -354,13 +372,15 @@ model %>% compile(loss = "binary_crossentropy", optimizer = "adam")
 
 summary(model)
 
-generated = skipgrams_generator(train_X, tokenizer, skip_window, negative_samples)
+#generated = skipgrams_generator(train_X, tokenizer, skip_window, negative_samples)
+generated = sampling_generator(train_X, train_Y, embedding_size)
 
 model %>%
   keras::fit_generator(.,
-                       skipgrams_generator(train_X, tokenizer, skip_window, negative_samples),
-                       steps_per_epoch = 1000,
-                       epochs = 1)
+                       skipgrams_generator(train_X, tokenizer, skip_window, num_sampled),
+                       #sampling_generator(train_X, train_Y, embedding_size),
+                       steps_per_epoch = 128,
+                       epochs = 2)
 
 embedding_matrix <- get_weights(model)[[1]]
 
