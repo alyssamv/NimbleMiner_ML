@@ -161,7 +161,7 @@ tokenizer <- text_tokenizer(num_words = max_words) %>%
 sequences <- texts_to_sequences(tokenizer, texts)
 word_index = tokenizer$word_index
 
-data <- pad_sequences(sequences, maxlen = maxlen, padding = "post") # change padding to post
+data <- pad_sequences(sequences, maxlen = maxlen, padding = "post") # pre-padding
 labels <- as.array(labels)
 ```
 
@@ -233,7 +233,7 @@ history <- model_lstm %>%
 
 
 ## Test
-prob_threshold = 0.99
+prob_threshold = 0.98 # predicted probability must be greater than this value to be positive
 
 model_lstm %>%
  evaluate(x_test, y_test) # Accuracy ~97%%; Loss 0.09
@@ -253,11 +253,11 @@ cm = caret::confusionMatrix(factor(predict_classes, levels = c(0, 1)),
                             positive = "1")
 
 data.frame(N.True = n.true, # 105
-           N.Predicted = n.predicted, # 105
-           Accuracy = cm$overall[["Accuracy"]], # 0.991
-           Precision = cm$byClass[["Precision"]], # 0.542
-           Recall = cm$byClass[["Recall"]], # 0.542
-           F1 = cm$byClass[["F1"]]) # 0.542
+           N.Predicted = n.predicted, # 185
+           Accuracy = cm$overall[["Accuracy"]], # 0.989
+           Precision = cm$byClass[["Precision"]], # 0.437
+           Recall = cm$byClass[["Recall"]], # 0.771
+           F1 = cm$byClass[["F1"]]) # 0.558
 ```
 
 
@@ -320,7 +320,7 @@ predict_probs.w2v = model_w2v_embedding %>%
   predict_proba(x_test, 
                 batch_size = 64)
 
-predict_classes_w2v <- if_else(predict_x.w2v[,1] > prob_threshold, 1, 0)
+predict_classes_w2v <- if_else(predict_probs.w2v[,1] > prob_threshold, 1, 0)
 
 n.predicted.w2v = table(predict_classes_w2v)[[2]]
 
@@ -329,76 +329,173 @@ cm_w2v = caret::confusionMatrix(factor(predict_classes_w2v, levels = c(0, 1)),
                             positive = "1")
 
 data.frame(N.True = n.true, # 105
-           N.Predicted = n.predicted.w2v, # 139
+           N.Predicted = n.predicted.w2v, # 161
            Accuracy = cm_w2v$overall[["Accuracy"]], # 0.989
-           Precision = cm_w2v$byClass[["Precision"]], # 0.437
-           Recall = cm_w2v$byClass[["Recall"]], # 0.695
-           F1 = cm_w2v$byClass[["F1"]]) # 0.537
+           Precision = cm_w2v$byClass[["Precision"]], # 0.434
+           Recall = cm_w2v$byClass[["Recall"]], # 0.667
+           F1 = cm_w2v$byClass[["F1"]]) # 0.526
 ```
 
 Both models perform comparably, but with word2vec we have efficiency gain in time and CPU load.
 
 
 
-<!-- ### GloVe embedding  -->
+### GloVe embedding
 
 
-<!-- ```{r} -->
-<!-- # resource: http://text2vec.org/glove.html -->
+```{r}
+# resource: http://text2vec.org/glove.html
 
-<!-- library(text2vec) -->
+library(text2vec)
 
-<!-- # Create iterator over tokens -->
-<!-- tokens <- space_tokenizer(texts) -->
-<!-- # Create vocabulary. Terms will be unigrams (simple words). -->
-<!-- it = itoken(tokens, progressbar = FALSE) -->
-<!-- vocab <- create_vocabulary(it) -->
+# Create iterator over tokens
+tokens <- space_tokenizer(texts)
+# Create vocabulary. Terms will be unigrams (simple words).
+it = itoken(tokens, progressbar = FALSE)
+vocab <- create_vocabulary(it)
 
-<!-- # Only take words which appear at least 5 times -->
-<!-- vocab <- prune_vocabulary(vocab, term_count_min = 5L) -->
+# Only take words which appear at least 5 times
+vocab <- prune_vocabulary(vocab, term_count_min = 5L)
 
-<!-- # Use our filtered vocabulary -->
-<!-- vectorizer <- vocab_vectorizer(vocab) -->
-<!-- # Term co-occurence matrix; use window of 5 for context words -->
-<!-- tcm <- create_tcm(it, vectorizer, skip_grams_window = 5L) -->
+# Use our filtered vocabulary
+vectorizer <- vocab_vectorizer(vocab)
+# Term co-occurence matrix; use window of 5 for context words
+tcm <- create_tcm(it, vectorizer, skip_grams_window = 5L)
 
-<!-- glove = GlobalVectors$new(word_vectors_size = 50, vocabulary = vocab, x_max = 10) -->
-<!-- wv_main = fit_transform(tcm, glove, n_iter = 20) -->
+glove = GlobalVectors$new(word_vectors_size = 50, vocabulary = vocab, x_max = 10)
+wv_main = fit_transform(tcm, glove, n_iter = 20)
 
-<!-- wv_context <- glove$components -->
+wv_context <- glove$components
 
-<!-- word_vectors = wv_main + t(wv_context) -->
+word_vectors = wv_main + t(wv_context)
 
-<!-- dysp <- word_vectors["dyspnea", , drop = FALSE] -->
-<!-- # find related terms -->
-<!-- cos_sim = sim2(x = word_vectors, y = dysp, method = "cosine", norm = "l2") -->
-<!-- head(sort(cos_sim[,1], decreasing = TRUE), 10) # looks good -->
-<!-- ``` -->
+dysp <- word_vectors["dyspnea", , drop = FALSE]
+# find related terms
+cos_sim = sim2(x = word_vectors, y = dysp, method = "cosine", norm = "l2")
+head(sort(cos_sim[,1], decreasing = TRUE), 10) # looks good
+```
 
 
-<!-- ```{r loading_glove_embeddings_weights} -->
-<!-- #glove_dir = "/Users/nguyenh/Desktop/cumc/tensorflow_project/glove.6B" -->
-<!-- #lines <- readLines(file.path(glove_dir, "glove.6B.100d.txt")) -->
-<!-- embeddings_index <- new.env(hash = TRUE, parent = emptyenv()) -->
+```{r loading_glove_embeddings_weights}
+# code from https://keras.rstudio.com/articles/examples/pretrained_word_embeddings.html
+glove_dir = file.path(params$data_folder, "glove")
+lines <- readLines(file.path(glove_dir, "glove.6B.100d.txt"))
+embeddings_index <- new.env(hash = TRUE, parent = emptyenv())
 
-<!-- # for (i in 1:length(lines)) { -->
-<!-- #  line <- lines[[i]] -->
-<!-- #  values <- strsplit(line, " ")[[1]] -->
-<!-- #  word <- values[[1]] -->
-<!-- #  embeddings_index[[word]] <- as.double(values[-1]) -->
-<!-- # } -->
-<!-- # cat("Found", length(embeddings_index), "word vectors.\n") -->
+for (i in 1:length(lines)) {
+ line <- lines[[i]]
+ values <- strsplit(line, " ")[[1]]
+ word <- values[[1]]
+ embeddings_index[[word]] <- as.double(values[-1])
+}
+```
 
-<!-- max_words <- 10000 -->
-<!-- embedding_dim <- ncol(dysp) -->
-<!-- embedding_matrix <- array(0, c(max_words, embedding_dim)) -->
 
-<!-- for (word in names(word_index)) { -->
-<!--   index <- word_index[[word]] -->
-<!--   if (index < max_words) { -->
-<!--     embedding_vector <- embeddings_index[[word]] -->
-<!--     if (!is.null(embedding_vector)) -->
-<!--       embedding_matrix[index+1,] <- embedding_vector -->
-<!--  } -->
-<!-- } -->
-<!-- ``` -->
+```{r glove_model}
+# prepare embedding matrix
+num_words <- min(max_words, length(word_index) + 1)
+embedding_dim = 100
+
+prepare_embedding_matrix <- function() {
+  embedding_matrix <- matrix(0L, nrow = num_words, ncol = embedding_dim)
+  
+  for (word in names(word_index)) {
+    index <- word_index[[word]]
+    if (index >= max_words)
+      next
+    embedding_vector <- embeddings_index[[word]]
+    if (!is.null(embedding_vector)) {
+      # words not found in embedding index will be all-zeros.
+      embedding_matrix[index, ] <- embedding_vector
+    }
+  }
+  embedding_matrix
+}
+
+embedding_matrix <- prepare_embedding_matrix()
+
+
+## Train
+model_glove <- keras_model_sequential() %>%
+  # Add embedding layer
+  layer_embedding(input_dim = num_words,
+                  output_dim = embedding_dim,
+                  weights = list(embedding_matrix),
+                  input_length = maxlen,
+                  trainable = FALSE
+                  ) %>%
+  layer_flatten() %>% 
+  layer_dropout(0.4) %>%
+  layer_dense(units = 32, 
+              activation = "tanh",
+              kernel_regularizer = regularizer_l2(0.01) # adding regularizer improves metrics
+              ) %>% 
+  layer_dropout(0.3) %>%
+  layer_dense(units = 16, 
+              activation = "tanh") %>%
+  layer_dense(units = 1, 
+              activation = "sigmoid")
+
+# # train a 1D convnet with global maxpooling
+# sequence_input <- layer_input(shape = list(maxlen), dtype = 'int32')
+# 
+# preds <- sequence_input %>%
+#   embedding_layer %>%
+#   layer_flatten() %>% 
+#   layer_dropout(0.4) %>%
+#   layer_dense(units = 32, 
+#               activation = "tanh",
+#               kernel_regularizer = regularizer_l2(0.01) # adding regularizer improves metrics
+#               ) %>% 
+#   layer_dropout(0.3) %>%
+#   layer_dense(units = 16, 
+#               activation = "tanh") %>%
+#   layer_dense(units = 1, 
+#               activation = "sigmoid")
+# 
+# 
+# model_glove <- keras_model_sequential(sequence_input, preds)
+
+model_glove %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'rmsprop',
+  metrics = c('accuracy')  
+)
+
+set.seed(100)
+history <- model_glove %>% fit(
+  x_train, 
+  y_train,
+  batch_size = 64,
+  epochs = 10,
+  validation_data = list(x_val, y_val)
+)
+
+## Test
+model_glove %>%
+ evaluate(x_test, y_test) # Accuracy ~97%%; Loss 0.12
+
+predict_probs.glove = model_glove %>% 
+  # predict probability of presence of dyspnea symptoms
+  keras::predict_proba(x_test, 
+                       batch_size = 64)
+
+
+prob_threshold = 0.6
+predict_classes_glove <- if_else(predict_probs.glove[,1] > prob_threshold, 1, 0)
+
+n.predicted.glove = table(predict_classes_glove)[[2]]
+
+cm_glove = caret::confusionMatrix(factor(predict_classes_glove, levels = c(0, 1)), 
+                                  factor(y_test, levels = c(0, 1)),
+                                  positive = "1")
+
+data.frame(N.True = n.true, # 105
+           N.Predicted = n.predicted.glove, # 347
+           Accuracy = cm_glove$overall[["Accuracy"]], # 0.969
+           Precision = cm_glove$byClass[["Precision"]], # 0.081
+           Recall = cm_glove$byClass[["Recall"]], # 0.238
+           F1 = cm_glove$byClass[["F1"]]) # 0.121
+```
+
+GloVe embedding does not work as well as word2vec.
