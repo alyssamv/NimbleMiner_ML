@@ -519,8 +519,8 @@ texts <- full_clinical_notes_data %>%
 labels <- full_clinical_notes_data %>% 
   pull(dyspnea)
 
-# Max length for each sentence is 10. 
-maxlen <- 20
+# Max length for each document is about 5 times the length of 1 sentence. 
+maxlen <- maxlen*chunk_size
 max_words <- 10000
 
 # Tokenize words
@@ -554,7 +554,7 @@ y_test <- labels[test_indices]
 
 ```{r basic_nn_train_validate5, warning = FALSE}
 model_basic_nn <- keras_model_sequential() %>%
-  layer_dense(units = 16, activation = "relu", input_shape = c(20)) %>%
+  layer_dense(units = 16, activation = "relu", input_shape = c(maxlen)) %>%
   layer_dropout(0.5) %>% 
   layer_dense(units = 8, activation = "relu") %>%
   layer_dropout(0.5) %>% 
@@ -587,7 +587,7 @@ model_basic_nn %>% fit(
 # )
 
 # Accuracy of ~85.6%; Loss of ~1.35
-results_5 = model_basic_nn %>%
+reults_5 = model_basic_nn %>%
  evaluate(x_test, y_test)
 
 predict_x = model_basic_nn %>% predict_classes(x_test) # predict classes (presence of dyspnea symptoms)
@@ -596,14 +596,14 @@ table(y_test)
 
 #keras_measures(predicted_labels = predict_x[,1], true_labels = y_test)
 
-cm = caret::confusionMatrix(factor(predict_x[,1], levels = c(0,1 )), 
+cm_5 = caret::confusionMatrix(factor(predict_x[,1], levels = c(0,1 )), 
                             factor(y_test, levels = c(0, 1)),
                             positive = "1")
 
-data.frame(Accuracy = cm$overall[["Accuracy"]],
-           Precision = cm$byClass[["Precision"]],
-           Recall = cm$byClass[["Recall"]],
-           F1 = cm$byClass[["F1"]])
+data.frame(Accuracy = cm_5$overall[["Accuracy"]],
+           Precision = cm_5$byClass[["Precision"]],
+           Recall = cm_5$byClass[["Recall"]],
+           F1 = cm_5$byClass[["F1"]])
 ```
 
 
