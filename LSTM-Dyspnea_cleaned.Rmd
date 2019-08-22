@@ -138,9 +138,7 @@ rm(training_report_head, no_original_report)
 
 ```
 
-
-```{r encoding_keras}
-
+```{r all_data}
 all_notes = test_notes %>%
   select(note_processed, dyspnea, report_no, Label) %>%
   rbind(., training_notes)
@@ -150,10 +148,12 @@ texts <- all_notes %>%
   pull(note_processed)
 labels <- all_notes %>% 
   pull(dyspnea)
+```
 
-# Max length for each sentence is 10. 
-maxlen <- 20
-max_words <- 10000
+
+```{r encoding_keras}
+maxlen <- 20 # Max length (num words) for each document (sentence) is 20
+max_words <- 10000 # size of the dictionary to be created
 
 # Tokenize words
 tokenizer <- text_tokenizer(num_words = max_words) %>%
@@ -161,7 +161,7 @@ tokenizer <- text_tokenizer(num_words = max_words) %>%
 sequences <- texts_to_sequences(tokenizer, texts)
 word_index = tokenizer$word_index
 
-data <- pad_sequences(sequences, maxlen = maxlen)
+data <- pad_sequences(sequences, maxlen = maxlen, padding = "post") # change padding to post
 labels <- as.array(labels)
 ```
 
@@ -197,17 +197,21 @@ y_test <- labels[test_indices]
 
 
 ```{r lstm}
-maxlen <- 20
-max_features <- 10000
+maxlen <- 20 # maximum length of each sentence
+max_features <- 10000 # expected size of dictionary
+embedding_dim <- 7 # number of surrounding words to consider; 7 is optimal
 
+## Model
 model_lstm <- keras_model_sequential() %>%
-  layer_embedding(input_dim = max_features, 
-                  output_dim = 32) %>%
+  layer_embedding(input_dim = max_features,
+                  output_dim = embedding_dim
+                  ) %>%
   layer_lstm(units = 32) %>%
-  layer_dense(units = 16, 
+  layer_dense(units = 16,
               activation = "tanh",
-              kernel_regularizer = regularizer_l2(0.01)) %>% 
-  layer_dropout(0.2) %>% 
+              kernel_regularizer = regularizer_l2(0.01)
+              ) %>%
+  layer_dropout(0.2) %>%
   layer_dense(units = 1, activation = "sigmoid")
 
 model_lstm %>% compile(
@@ -216,69 +220,169 @@ model_lstm %>% compile(
  metrics = c("accuracy")
 )
 
-set.seed(1)
-history <- model_lstm %>% 
+## Train
+set.seed(100)
+history <- model_lstm %>%
   fit(
-    x_train, 
+    x_train,
     y_train,
     epochs = 10,
-    batch_size = 128,
+    batch_size = 64,
     validation_data = list(x_val, y_val)
   )
-```
 
-```{r lstm_test}
-# Accuracy ~93%%; Loss 0.24
+
+## Test
+
 model_lstm %>%
- evaluate(x_test, y_test)
+ evaluate(x_test, y_test) # Accuracy ~97%%; Loss 0.09
 
 predict_x = model_lstm %>% predict_classes(x_test) # predict classes (presence of dyspnea symptoms)
 n.predicted = table(predict_x)[[2]]
 n.true = table(y_test)[[2]]
 
-cm = caret::confusionMatrix(factor(predict_x[, 1], levels = c(0, 1)), 
+cm = caret::confusionMatrix(factor(predict_x[, 1], levels = c(0, 1)),
                             factor(y_test, levels = c(0, 1)),
                             positive = "1")
 
 data.frame(N.True = n.true, # 105
-           N.Predicted = n.predicted, # 475
-           Accuracy = cm$overall[["Accuracy"]], # 0.966
-           Precision = cm$byClass[["Precision"]], # 202
-           Recall = cm$byClass[["Recall"]], # 0.914
-           F1 = cm$byClass[["F1"]]) # 0.331
+           N.Predicted = n.predicted, # 407
+           Accuracy = cm$overall[["Accuracy"]], # 0.971
+           Precision = cm$byClass[["Precision"]], # 0.226
+           Recall = cm$byClass[["Recall"]], # 0.876
+           F1 = cm$byClass[["F1"]]) # 0.359
 ```
 
 
-### LSTM with GloVe word embedding
 
-```{r}
-# resource: http://text2vec.org/glove.html
+### Word2vec embedding
 
-library(text2vec)
+```{r glove_embedding_model_definition, warning = FALSE}
+maxlen <- 20 # maximum length of each sentence -->
+max_features <- 10000 # expected size of dictionary -->
+embedding_dim <- 7 # number of surrounding words to consider; 7 is optimal -->
 
-# Create iterator over tokens
-tokens <- space_tokenizer(texts)
-# Create vocabulary. Terms will be unigrams (simple words).
-it = itoken(tokens, progressbar = FALSE)
-vocab <- create_vocabulary(it)
+## Model
+model_glove_embedding <- keras_model_sequential() %>%
+  # Add embedding layer
+  layer_embedding(input_dim = max_words, # size of dictionary
+                  output_dim = embedding_dim, # dimension to embed into
+                  input_length = maxlen, # maximum document length
+                  name = "embedding"
+                  ) %>%
+  layer_flatten() %>% 
+  layer_dropout(0.4) %>%
+  layer_dense(units = 32, 
+              activation = "tanh",
+              kernel_regularizer = regularizer_l2(0.01) # adding regularizer improves metrics
+              ) %>% 
+  layer_dropout(0.3) %>%
+  layer_dense(units = 16, 
+              activation = "tanh") %>%
+  layer_dense(units = 1, 
+              activation = "sigmoid")
 
-vocab <- prune_vocabulary(vocab, term_count_min = 5L)
+# get_layer(model_glove_embedding, name = "embedding") %>%
+#  set_weights(list(embedding_matrix)) %>%
+#  freeze_weights()
 
-# Use our filtered vocabulary
-vectorizer <- vocab_vectorizer(vocab)
-# use window of 5 for context words
-tcm <- create_tcm(it, vectorizer, skip_grams_window = 5L)
+model_glove_embedding %>% compile(
+ optimizer = "rmsprop",
+ loss = "binary_crossentropy",
+ metrics = c("accuracy")
+)
 
-glove = GlobalVectors$new(word_vectors_size = 50, vocabulary = vocab, x_max = 10)
-wv_main = fit_transform(tcm, glove, n_iter = 20)
+## Train
+set.seed(100)
+history <- model_glove_embedding %>% fit(
+ x_train, 
+ y_train,
+ epochs = 10,
+ batch_size = 64,
+ validation_data = list(x_val, y_val)
+)
 
-wv_context <- glove$components
+## Test
 
-word_vectors = wv_main + t(wv_context)
+model_glove_embedding %>%
+ evaluate(x_test, y_test) # Accuracy ~97%%; Loss 0.12
 
-dysp <- word_vectors["dyspnea", , drop = FALSE] 
-# find related terms 
-cos_sim = sim2(x = word_vectors, y = dysp, method = "cosine", norm = "l2")
-head(sort(cos_sim[,1], decreasing = TRUE), 10) # looks good
+predict_x.glove = model_glove_embedding %>% predict_classes(x_test) # predict classes (presence of dyspnea symptoms)
+n.predicted.glove = table(predict_x.glove)[[2]]
+
+cm_glove = caret::confusionMatrix(factor(predict_x.glove[, 1], levels = c(0, 1)), 
+                            factor(y_test, levels = c(0, 1)),
+                            positive = "1")
+
+data.frame(N.True = n.true, # 105
+           N.Predicted = n.predicted.glove, # 455
+           Accuracy = cm_glove$overall[["Accuracy"]], # 0.968
+           Precision = cm_glove$byClass[["Precision"]], # 0.204
+           Recall = cm_glove$byClass[["Recall"]], # 0.885
+           F1 = cm_glove$byClass[["F1"]]) # 0.332
 ```
 
+With an flattened embedding layer, metrics are *slightly* worse than previous model, but there is decent gain in efficiency (time to train model and CPU load).
+
+<!-- ### GloVe embedding  -->
+
+
+<!-- ```{r} -->
+<!-- # resource: http://text2vec.org/glove.html -->
+
+<!-- library(text2vec) -->
+
+<!-- # Create iterator over tokens -->
+<!-- tokens <- space_tokenizer(texts) -->
+<!-- # Create vocabulary. Terms will be unigrams (simple words). -->
+<!-- it = itoken(tokens, progressbar = FALSE) -->
+<!-- vocab <- create_vocabulary(it) -->
+
+<!-- # Only take words which appear at least 5 times -->
+<!-- vocab <- prune_vocabulary(vocab, term_count_min = 5L) -->
+
+<!-- # Use our filtered vocabulary -->
+<!-- vectorizer <- vocab_vectorizer(vocab) -->
+<!-- # Term co-occurence matrix; use window of 5 for context words -->
+<!-- tcm <- create_tcm(it, vectorizer, skip_grams_window = 5L) -->
+
+<!-- glove = GlobalVectors$new(word_vectors_size = 50, vocabulary = vocab, x_max = 10) -->
+<!-- wv_main = fit_transform(tcm, glove, n_iter = 20) -->
+
+<!-- wv_context <- glove$components -->
+
+<!-- word_vectors = wv_main + t(wv_context) -->
+
+<!-- dysp <- word_vectors["dyspnea", , drop = FALSE] -->
+<!-- # find related terms -->
+<!-- cos_sim = sim2(x = word_vectors, y = dysp, method = "cosine", norm = "l2") -->
+<!-- head(sort(cos_sim[,1], decreasing = TRUE), 10) # looks good -->
+<!-- ``` -->
+
+
+<!-- ```{r loading_glove_embeddings_weights} -->
+<!-- #glove_dir = "/Users/nguyenh/Desktop/cumc/tensorflow_project/glove.6B" -->
+<!-- #lines <- readLines(file.path(glove_dir, "glove.6B.100d.txt")) -->
+<!-- embeddings_index <- new.env(hash = TRUE, parent = emptyenv()) -->
+
+<!-- # for (i in 1:length(lines)) { -->
+<!-- #  line <- lines[[i]] -->
+<!-- #  values <- strsplit(line, " ")[[1]] -->
+<!-- #  word <- values[[1]] -->
+<!-- #  embeddings_index[[word]] <- as.double(values[-1]) -->
+<!-- # } -->
+<!-- # cat("Found", length(embeddings_index), "word vectors.\n") -->
+
+<!-- max_words <- 10000 -->
+<!-- embedding_dim <- ncol(dysp) -->
+<!-- embedding_matrix <- array(0, c(max_words, embedding_dim)) -->
+
+<!-- for (word in names(word_index)) { -->
+<!--   index <- word_index[[word]] -->
+<!--   if (index < max_words) { -->
+<!--     embedding_vector <- embeddings_index[[word]] -->
+<!--     if (!is.null(embedding_vector)) -->
+<!--       embedding_matrix[index+1,] <- embedding_vector -->
+<!--  } -->
+<!-- } -->
+<!-- ``` -->
