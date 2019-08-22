@@ -233,37 +233,44 @@ history <- model_lstm %>%
 
 
 ## Test
+prob_threshold = 0.99
 
 model_lstm %>%
  evaluate(x_test, y_test) # Accuracy ~97%%; Loss 0.09
 
-predict_x = model_lstm %>% predict_classes(x_test) # predict classes (presence of dyspnea symptoms)
-n.predicted = table(predict_x)[[2]]
+predict_probs = model_lstm %>% 
+  # predict probability of presence of dyspnea symptoms
+  predict_proba(x_test, 
+                batch_size = 64)
+
+predict_classes <- if_else(predict_probs[,1] > prob_threshold, 1, 0) # increased probability threshold to limit classification with unbalanced test data
+
+n.predicted = table(predict_classes)[[2]]
 n.true = table(y_test)[[2]]
 
-cm = caret::confusionMatrix(factor(predict_x[, 1], levels = c(0, 1)),
+cm = caret::confusionMatrix(factor(predict_classes, levels = c(0, 1)),
                             factor(y_test, levels = c(0, 1)),
                             positive = "1")
 
 data.frame(N.True = n.true, # 105
-           N.Predicted = n.predicted, # 407
-           Accuracy = cm$overall[["Accuracy"]], # 0.971
-           Precision = cm$byClass[["Precision"]], # 0.226
-           Recall = cm$byClass[["Recall"]], # 0.876
-           F1 = cm$byClass[["F1"]]) # 0.359
+           N.Predicted = n.predicted, # 105
+           Accuracy = cm$overall[["Accuracy"]], # 0.991
+           Precision = cm$byClass[["Precision"]], # 0.542
+           Recall = cm$byClass[["Recall"]], # 0.542
+           F1 = cm$byClass[["F1"]]) # 0.542
 ```
 
 
 
 ### Word2vec embedding
 
-```{r glove_embedding_model_definition, warning = FALSE}
+```{r w2v_embedding_model_definition, warning = FALSE}
 maxlen <- 20 # maximum length of each sentence -->
 max_features <- 10000 # expected size of dictionary -->
 embedding_dim <- 7 # number of surrounding words to consider; 7 is optimal -->
 
 ## Model
-model_glove_embedding <- keras_model_sequential() %>%
+model_w2v_embedding <- keras_model_sequential() %>%
   # Add embedding layer
   layer_embedding(input_dim = max_words, # size of dictionary
                   output_dim = embedding_dim, # dimension to embed into
@@ -282,11 +289,11 @@ model_glove_embedding <- keras_model_sequential() %>%
   layer_dense(units = 1, 
               activation = "sigmoid")
 
-# get_layer(model_glove_embedding, name = "embedding") %>%
+# get_layer(model_w2v_embedding, name = "embedding") %>%
 #  set_weights(list(embedding_matrix)) %>%
 #  freeze_weights()
 
-model_glove_embedding %>% compile(
+model_w2v_embedding %>% compile(
  optimizer = "rmsprop",
  loss = "binary_crossentropy",
  metrics = c("accuracy")
@@ -294,7 +301,7 @@ model_glove_embedding %>% compile(
 
 ## Train
 set.seed(100)
-history <- model_glove_embedding %>% fit(
+history <- model_w2v_embedding %>% fit(
  x_train, 
  y_train,
  epochs = 10,
@@ -303,26 +310,35 @@ history <- model_glove_embedding %>% fit(
 )
 
 ## Test
+prob_threshold = 0.98
 
-model_glove_embedding %>%
+model_w2v_embedding %>%
  evaluate(x_test, y_test) # Accuracy ~97%%; Loss 0.12
 
-predict_x.glove = model_glove_embedding %>% predict_classes(x_test) # predict classes (presence of dyspnea symptoms)
-n.predicted.glove = table(predict_x.glove)[[2]]
+predict_probs.w2v = model_w2v_embedding %>% 
+  # predict probability of presence of dyspnea symptoms
+  predict_proba(x_test, 
+                batch_size = 64)
 
-cm_glove = caret::confusionMatrix(factor(predict_x.glove[, 1], levels = c(0, 1)), 
+predict_classes_w2v <- if_else(predict_x.w2v[,1] > prob_threshold, 1, 0)
+
+n.predicted.w2v = table(predict_classes_w2v)[[2]]
+
+cm_w2v = caret::confusionMatrix(factor(predict_classes_w2v, levels = c(0, 1)), 
                             factor(y_test, levels = c(0, 1)),
                             positive = "1")
 
 data.frame(N.True = n.true, # 105
-           N.Predicted = n.predicted.glove, # 455
-           Accuracy = cm_glove$overall[["Accuracy"]], # 0.968
-           Precision = cm_glove$byClass[["Precision"]], # 0.204
-           Recall = cm_glove$byClass[["Recall"]], # 0.885
-           F1 = cm_glove$byClass[["F1"]]) # 0.332
+           N.Predicted = n.predicted.w2v, # 139
+           Accuracy = cm_w2v$overall[["Accuracy"]], # 0.989
+           Precision = cm_w2v$byClass[["Precision"]], # 0.437
+           Recall = cm_w2v$byClass[["Recall"]], # 0.695
+           F1 = cm_w2v$byClass[["F1"]]) # 0.537
 ```
 
-With an flattened embedding layer, metrics are *slightly* worse than previous model, but there is decent gain in efficiency (time to train model and CPU load).
+Both models perform comparably, but with word2vec we have efficiency gain in time and CPU load.
+
+
 
 <!-- ### GloVe embedding  -->
 
