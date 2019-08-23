@@ -196,6 +196,8 @@ y_test <- labels[test_indices]
 ```
 
 
+### Word2vec embedding
+
 ```{r lstm}
 maxlen <- 20 # maximum length of each sentence
 max_features <- 10000 # expected size of dictionary
@@ -262,80 +264,6 @@ data.frame(N.True = n.true, # 105
 
 
 
-### Word2vec embedding
-
-```{r w2v_embedding_model_definition, warning = FALSE}
-maxlen <- 20 # maximum length of each sentence -->
-max_features <- 10000 # expected size of dictionary -->
-embedding_dim <- 7 # number of surrounding words to consider; 7 is optimal -->
-
-## Model
-model_w2v_embedding <- keras_model_sequential() %>%
-  # Add embedding layer
-  layer_embedding(input_dim = max_words, # size of dictionary
-                  output_dim = embedding_dim, # dimension to embed into
-                  input_length = maxlen, # maximum document length
-                  name = "embedding"
-                  ) %>%
-  # layer_flatten() %>% 
-  layer_lstm(units = 32) %>%
-  layer_dense(units = 16,
-              activation = "tanh",
-              kernel_regularizer = regularizer_l2(0.01)
-              ) %>%
-  layer_dropout(0.2) %>%
-  layer_dense(units = 1, activation = "sigmoid")
-
-# get_layer(model_w2v_embedding, name = "embedding") %>%
-#  set_weights(list(embedding_matrix)) %>%
-#  freeze_weights()
-
-model_w2v_embedding %>% compile(
- optimizer = "rmsprop",
- loss = "binary_crossentropy",
- metrics = c("accuracy")
-)
-
-## Train
-set.seed(100)
-history <- model_w2v_embedding %>% fit(
- x_train, 
- y_train,
- epochs = 10,
- batch_size = 64,
- validation_data = list(x_val, y_val)
-)
-
-## Test
-model_w2v_embedding %>%
- evaluate(x_test, y_test) # Accuracy ~97%%; Loss 0.12
-
-predict_probs.w2v = model_w2v_embedding %>% 
-  # predict probability of presence of dyspnea symptoms
-  predict_proba(x_test, 
-                batch_size = 64)
-
-
-prob_threshold = 0.99
-predict_classes_w2v <- if_else(predict_probs.w2v[,1] > prob_threshold, 1, 0)
-
-n.predicted.w2v = table(predict_classes_w2v)[[2]]
-
-cm_w2v = caret::confusionMatrix(factor(predict_classes_w2v, levels = c(0, 1)), 
-                            factor(y_test, levels = c(0, 1)),
-                            positive = "1")
-
-data.frame(N.True = n.true, # 105
-           N.Predicted = n.predicted.w2v, # 207
-           Accuracy = cm_w2v$overall[["Accuracy"]], # 0.986
-           Precision = cm_w2v$byClass[["Precision"]], # 0.386
-           Recall = cm_w2v$byClass[["Recall"]], # 0.761
-           F1 = cm_w2v$byClass[["F1"]]) # 0.512
-```
-
-
-Note: Word2vec embedding works better with simple NNET model (f=0.526) than with LSTM. Plus, simple NNET model is faster and smaller CPU load.
-
 ### GloVe embedding
 
 
@@ -384,10 +312,7 @@ for (i in 1:length(lines)) {
  word <- values[[1]]
  embeddings_index[[word]] <- as.double(values[-1])
 }
-```
 
-
-```{r glove_model}
 # prepare embedding matrix
 num_words <- min(max_words, length(word_index) + 1)
 embedding_dim = 100
@@ -410,7 +335,10 @@ prepare_embedding_matrix <- function() {
 
 embedding_matrix <- prepare_embedding_matrix()
 
+```
 
+
+```{r glove_model}
 ## Train
 model_glove <- keras_model_sequential() %>%
   # Add embedding layer
@@ -473,4 +401,3 @@ data.frame(N.True = n.true, # 105
            F1 = cm_glove$byClass[["F1"]]) # 0.540
 ```
 
-GloVe embedding works better with LSTM model than simple NNET. Also, has better performance than the above model. Similar run time and CPU load.
