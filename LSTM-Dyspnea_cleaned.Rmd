@@ -259,7 +259,31 @@ data.frame(N.True = n.true, # 105
            F1 = cm$byClass[["F1"]]) # 0.517
 ```
 
+```{r document_accuracy_w2v}
 
+t = data.frame(report_no = test_notes$report_no,
+               truth = test_notes$dyspnea,
+               prediction = predict_classes) %>%
+  group_by(report_no) %>%
+  summarise(truth = sum(truth),
+            prediction = sum(prediction)) %>%
+  transmute(truth = ifelse(truth > 0 , 1, 0),
+            prediction = ifelse(prediction > 0, 1, 0))
+  
+cm_doc = caret::confusionMatrix(factor(t$prediction, levels = c(0, 1)),
+                            factor(t$truth, levels = c(0, 1)),
+                            positive = "1")
+
+
+data.frame(N.True = sum(t$truth), # 69
+           N.Predicted = sum(t$prediction), # 106
+           Accuracy = cm_doc$overall[["Accuracy"]], # 0.699
+           Precision = cm_doc$byClass[["Precision"]], # 0.622
+           Recall = cm_doc$byClass[["Recall"]], # 0.956
+           F1 = cm_doc$byClass[["F1"]]) # 0.754
+```
+
+69 out of 143 (45\%) of test notes have evidence of dyspnea. When predicting first at the sentence level, and then referencing back to the full document, we achieve an F-score of about 0.75.
 
 ### GloVe embedding
 
@@ -381,7 +405,7 @@ predict_probs.glove = model_glove %>%
                        batch_size = 64)
 
 
-prob_threshold = 0.99
+prob_threshold = 0.98
 predict_classes_glove <- if_else(predict_probs.glove[,1] > prob_threshold, 1, 0)
 
 n.predicted.glove = table(predict_classes_glove)[[2]]
@@ -396,5 +420,29 @@ data.frame(N.True = n.true, # 105
            Precision = cm_glove$byClass[["Precision"]], # 0.379
            Recall = cm_glove$byClass[["Recall"]], # 0.490
            F1 = cm_glove$byClass[["F1"]]) # 0.427
+```
+
+```{r document_accuracy_w2v}
+
+t_glove = data.frame(report_no = test_notes$report_no,
+               truth = test_notes$dyspnea,
+               prediction = predict_classes_glove) %>%
+  group_by(report_no) %>%
+  summarise(truth = sum(truth),
+            prediction = sum(prediction)) %>%
+  transmute(truth = ifelse(truth > 0 , 1, 0),
+            prediction = ifelse(prediction > 0, 1, 0))
+  
+cm_doc_glove = caret::confusionMatrix(factor(t_glove$prediction, levels = c(0, 1)),
+                            factor(t_glove$truth, levels = c(0, 1)),
+                            positive = "1")
+
+
+data.frame(N.True = sum(t_glove$truth), # 69
+           N.Predicted = sum(t_glove$prediction), # 94
+           Accuracy = cm_doc_glove$overall[["Accuracy"]], # 0.671
+           Precision = cm_doc_glove$byClass[["Precision"]], # 0.617
+           Recall = cm_doc_glove$byClass[["Recall"]], # 0.840
+           F1 = cm_doc_glove$byClass[["F1"]]) # 0.711
 ```
 
