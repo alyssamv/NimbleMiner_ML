@@ -1,0 +1,451 @@
+---
+title: "Optimizing LSTM"
+output: html_document
+params:
+  data_folder: "~/Desktop/DSI_NimbleMiner/NimbleMiner_ML/data/"
+---
+
+Based on model analysis for different chunk sizes, sentence-level prediction was best.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+pkg <- c("devtools"
+        ,"pander"
+        ,"knitr"
+        ,"dplyr"
+        ,"tidyr"
+        ,"stringr"
+        ,"lubridate"
+        ,"purrr"
+        ,"DT"
+        ,"tidytext"
+        ,"ggplot2"
+        ,"textstem"
+        ,"tm"
+        ,"splitstackshape"
+        ,"text2vec"
+        ,"reshape"
+        ,"readr"
+        ,"zoo"
+        ,"keras"
+        ,"rword2vec"
+        ,"reticulate")
+invisible(lapply(pkg, library, character.only = TRUE))
+options(warn = 0)
+
+category = "Chest.pain" # remaining consistent with prior development
+```
+
+### Data import
+
+```{r gold_standard}
+# LOADING ORIGINAL DATASET (GOLD STANDARD)
+gold_standard <- file.path(params$data_folder, 'test_150_sentences.csv')
+
+clinical_notes_raw_data <- gold_standard %>% 
+  readr::read_csv() %>% 
+  # report_head indicates the start of a note
+  mutate(report_head = str_detect(Note, "^admission date"))
+
+# report_head contains the column report_no, a unique identifier for each report
+# the report_head dataframe contain report_no, a unique indentifier for each report
+report_head <- clinical_notes_raw_data %>%
+  filter(report_head) %>%
+  select(Note, report_head) %>%
+  mutate(report_no = row_number()) %>%
+  select(-report_head)
+
+test_notes <- clinical_notes_raw_data %>% 
+  # joint with report_head dataframe, report_no show which report each sentence belongs to
+  left_join(report_head, by = c("Note")) %>% 
+  mutate(report_no = na.locf(report_no),
+         Note = tolower(Note), ####### make all lowercase
+         Note = removeNumbers(Note)) %>%  ####### remove all numbers
+  filter(Note != "") %>%   ####### remove lines with no sentences
+  tidyr::unite(Categories, contains("category")) %>%
+  select(-contains("copy")) %>%
+  # remove unnecessary whitespaces
+  mutate(note_processed = str_squish(Note)) %>% 
+  transmute(note_processed,
+            report_head,
+            report_no,
+            Categories) %>%
+  filter(!report_head) %>% 
+  # Create 14 label columns (one-hot encoding)
+  mutate(dyspnea = as.numeric(grepl("Dyspnea", Categories)),
+         confusions = as.numeric(grepl("Confusion", Categories)),
+         fatigue = as.numeric(grepl("Fatigue", Categories)),
+         abdomen.distension = as.numeric(grepl("abdomen.distension", Categories)),
+         cough = as.numeric(grepl("Cough", Categories)),
+         peripheral.edema = as.numeric(grepl("peripheral.edema", Categories)),
+         anorexia = as.numeric(grepl("Anorexia", Categories)),
+         wheeze = as.numeric(grepl("Wheeze", Categories)),
+         weight.change = as.numeric(grepl("Weight.loss.or.weight.gain", Categories)),
+         nausea = as.numeric(grepl("Nausea", Categories)),
+         chest.pain = as.numeric(grepl("Chest.pain", Categories)),
+         palpitation = as.numeric(grepl("Palpitation", Categories)),
+         exercise.intolerance = as.numeric(grepl("Exercise.intolerance", Categories)),
+         dizziness = as.numeric(grepl("Dizziness", Categories))) %>% 
+  # replace NA with 0
+  replace(is.na(.), 0) %>% 
+  select(-c(Categories, report_head)) %>%
+  mutate(Label = as.logical(chest.pain))
+
+rm(report_head)
+
+no_original_report = max(test_notes$report_no) # 95 notes in gold standard
+
+```
+
+
+```{r labeled_training_notes}
+labeled_data_path <- file.path(params$data_folder, 'train_chestpain.csv')
+
+training_notes_raw <- labeled_data_path %>%
+  readr::read_csv(skip_empty_rows = TRUE) %>%
+  mutate(Note = tolower(Note), ####### all lowercase
+         report_head = str_detect(Note, "^admission date"))
+
+training_report_head <- training_notes_raw %>%
+  filter(report_head) %>%
+  select(Note, report_head) %>%
+  mutate(report_no = row_number() + no_original_report) %>%
+  select(-report_head)
+
+training_notes <- training_notes_raw %>%
+  left_join(training_report_head, by = c("Note"))
+
+first_note_row = which(!is.na(training_notes$report_no))[[1]]
+
+training_notes = training_notes[first_note_row:nrow(training_notes), ] %>%
+  mutate(report_no = na.locf(report_no),
+         Note = removeNumbers(Note)) %>% ####### remove numbers
+  filter(Note != "") %>% ####### remove blank rows
+  mutate(note_processed = str_squish(Note)) %>%
+  transmute(note_processed,
+            chest.pain = as.numeric(Label),
+            report_head,
+            report_no,
+            Label) %>%
+  filter(!report_head) %>%
+  replace(is.na(.), 0) %>%
+  select(-report_head)
+
+#training_notes <- training_notes[1:(nrow(test_notes)*2), ]
+
+rm(training_report_head, no_original_report)
+
+```
+
+```{r all_data}
+all_notes = test_notes %>%
+  select(note_processed, chest.pain, report_no, Label) %>%
+  rbind(., training_notes)
+
+# Prepare the data and labels
+texts <- all_notes %>% 
+  pull(note_processed)
+labels <- all_notes %>% 
+  pull(chest.pain)
+```
+
+
+```{r encoding_keras}
+maxlen <- 20 # Max length (num words) for each document (sentence) is 20
+max_words <- 10000 # size of the dictionary to be created
+
+# Tokenize words
+tokenizer <- text_tokenizer(num_words = max_words) %>%
+ fit_text_tokenizer(texts)
+sequences <- texts_to_sequences(tokenizer, texts)
+word_index = tokenizer$word_index
+
+data <- pad_sequences(sequences, maxlen = maxlen, padding = "post") # post-padding
+labels <- as.array(labels)
+```
+
+
+```{r train_test}
+# number of reports in test set
+no_test_report <- test_notes %>%
+  pull(report_no) %>%
+  max()
+
+# number of reports in labeled data set
+no_training_report <- training_notes %>%
+  pull(report_no) %>%
+  max() - no_test_report
+
+
+training_reports = no_test_report + seq(1, (no_training_report)*0.8)
+validation_reports = max(training_reports) + seq(1, no_test_report)
+test_reports = seq(1, no_test_report)
+
+training_indices <- which(all_notes$report_no %in% training_reports)
+validation_indices <- which(all_notes$report_no %in% validation_reports)
+test_indices <- which(all_notes$report_no %in% test_reports)
+
+x_train <- data[training_indices, ]
+y_train <- labels[training_indices]
+x_val <- data[validation_indices, ]
+y_val <- labels[validation_indices]
+x_test <- data[test_indices, ]
+y_test <- labels[test_indices]
+
+```
+
+
+### Word2vec embedding
+
+```{r lstm}
+maxlen <- 20 # maximum length of each sentence
+max_features <- 10000 # expected size of dictionary
+embedding_dim <- 7 # number of surrounding words to consider; 7 is optimal
+
+## Model
+model_lstm <- keras_model_sequential() %>%
+  layer_embedding(input_dim = max_features,
+                  output_dim = embedding_dim
+                  ) %>%
+  layer_lstm(units = 32) %>%
+  layer_dense(units = 16,
+              activation = "tanh",
+              kernel_regularizer = regularizer_l2(0.01)
+              ) %>%
+  layer_dropout(0.2) %>%
+  layer_dense(units = 1, activation = "sigmoid")
+
+model_lstm %>% compile(
+ optimizer = "rmsprop",
+ loss = "binary_crossentropy",
+ metrics = c("accuracy")
+)
+
+## Train
+set.seed(100)
+history <- model_lstm %>%
+  fit(
+    x_train,
+    y_train,
+    epochs = 10,
+    batch_size = 64,
+    validation_data = list(x_val, y_val)
+  )
+
+
+## Test
+model_lstm %>%
+ evaluate(x_test, y_test) # Accuracy ~97%%; Loss 0.09
+
+predict_probs = model_lstm %>% 
+  # predict probability of presence of chest.pain symptoms
+  predict_proba(x_test, 
+                batch_size = 64)
+
+
+prob_threshold = 0.98 # predicted probability must be greater than this value to be positive
+predict_classes <- if_else(predict_probs[,1] > prob_threshold, 1, 0) # increased probability threshold to limit classification with unbalanced test data
+
+n.predicted = table(predict_classes)[[2]]
+n.true = table(y_test)[[2]]
+
+cm = caret::confusionMatrix(factor(predict_classes, levels = c(0, 1)),
+                            factor(y_test, levels = c(0, 1)),
+                            positive = "1")
+
+data.frame(N.True = n.true, # 81
+           N.Predicted = n.predicted, # 101
+           Accuracy = cm$overall[["Accuracy"]], # 0.992
+           Precision = cm$byClass[["Precision"]], # 0.237
+           Recall = cm$byClass[["Recall"]], # 0.296
+           F1 = cm$byClass[["F1"]]) # 0.263
+```
+
+```{r document_accuracy_w2v}
+
+t = data.frame(report_no = test_notes$report_no,
+               truth = test_notes$chest.pain,
+               prediction = predict_classes) %>%
+  group_by(report_no) %>%
+  summarise(truth = sum(truth),
+            prediction = sum(prediction)) %>%
+  transmute(truth = ifelse(truth > 0 , 1, 0),
+            prediction = ifelse(prediction > 0, 1, 0))
+  
+cm_doc = caret::confusionMatrix(factor(t$prediction, levels = c(0, 1)),
+                            factor(t$truth, levels = c(0, 1)),
+                            positive = "1")
+
+
+data.frame(N.True = sum(t$truth), # 40
+           N.Predicted = sum(t$prediction), # 65
+           Accuracy = cm_doc$overall[["Accuracy"]], # 0.657
+           Precision = cm_doc$byClass[["Precision"]], # 0.430
+           Recall = cm_doc$byClass[["Recall"]], # 0.7
+           F1 = cm_doc$byClass[["F1"]]) # 0.533
+```
+
+40 out of 143 (27\%) of test notes have evidence of chest.pain. When predicting first at the sentence level, and then referencing back to the full document, we achieve an F-score of about 0.6.
+
+### GloVe embedding
+
+
+<!-- ```{r} -->
+<!-- # resource: http://text2vec.org/glove.html -->
+
+<!-- library(text2vec) -->
+
+<!-- # Create iterator over tokens -->
+<!-- tokens <- space_tokenizer(texts) -->
+<!-- # Create vocabulary. Terms will be unigrams (simple words). -->
+<!-- it = itoken(tokens, progressbar = FALSE) -->
+<!-- vocab <- create_vocabulary(it) -->
+
+<!-- # Only take words which appear at least 5 times -->
+<!-- vocab <- prune_vocabulary(vocab, term_count_min = 5L) -->
+
+<!-- # Use our filtered vocabulary -->
+<!-- vectorizer <- vocab_vectorizer(vocab) -->
+<!-- # Term co-occurence matrix; use window of 5 for context words -->
+<!-- tcm <- create_tcm(it, vectorizer, skip_grams_window = 5L) -->
+
+<!-- glove = GlobalVectors$new(word_vectors_size = 50, vocabulary = vocab, x_max = 10) -->
+<!-- wv_main = fit_transform(tcm, glove, n_iter = 20) -->
+
+<!-- wv_context <- glove$components -->
+
+<!-- word_vectors = wv_main + t(wv_context) -->
+
+<!-- dysp <- word_vectors["chest.pain", , drop = FALSE] -->
+<!-- # find related terms -->
+<!-- cos_sim = sim2(x = word_vectors, y = dysp, method = "cosine", norm = "l2") -->
+<!-- head(sort(cos_sim[,1], decreasing = TRUE), 10) # looks good -->
+<!-- ``` -->
+
+
+```{r loading_glove_embeddings_weights}
+# code from https://keras.rstudio.com/articles/examples/pretrained_word_embeddings.html
+glove_dir = file.path(params$data_folder, "glove")
+lines <- readLines(file.path(glove_dir, "glove.6B.100d.txt"))
+embeddings_index <- new.env(hash = TRUE, parent = emptyenv())
+
+for (i in 1:length(lines)) {
+ line <- lines[[i]]
+ values <- strsplit(line, " ")[[1]]
+ word <- values[[1]]
+ embeddings_index[[word]] <- as.double(values[-1])
+}
+
+# prepare embedding matrix
+num_words <- min(max_words, length(word_index) + 1)
+embedding_dim = 100
+
+prepare_embedding_matrix <- function() {
+  embedding_matrix <- matrix(0L, nrow = num_words, ncol = embedding_dim)
+  
+  for (word in names(word_index)) {
+    index <- word_index[[word]]
+    if (index >= max_words)
+      next
+    embedding_vector <- embeddings_index[[word]]
+    if (!is.null(embedding_vector)) {
+      # words not found in embedding index will be all-zeros.
+      embedding_matrix[index, ] <- embedding_vector
+    }
+  }
+  embedding_matrix
+}
+
+embedding_matrix <- prepare_embedding_matrix()
+
+```
+
+
+```{r glove_model}
+## Train
+model_glove <- keras_model_sequential() %>%
+  # Add embedding layer
+  layer_embedding(input_dim = num_words,
+                  output_dim = embedding_dim,
+                  weights = list(embedding_matrix),
+                  input_length = maxlen,
+                  trainable = FALSE
+                  ) %>%
+#  layer_flatten() %>% 
+  layer_lstm(units = 32) %>%
+  layer_dense(units = 16,
+              activation = "tanh",
+              kernel_regularizer = regularizer_l2(0.01)
+              ) %>%
+  layer_dropout(0.2) %>%
+  layer_dense(units = 1, activation = "sigmoid")
+
+
+
+model_glove %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'rmsprop',
+  metrics = c('accuracy')  
+)
+
+set.seed(100)
+history <- model_glove %>% fit(
+  x_train, 
+  y_train,
+  batch_size = 64,
+  epochs = 10,
+  validation_data = list(x_val, y_val)
+)
+
+## Test
+model_glove %>%
+ evaluate(x_test, y_test) # Accuracy ~97%%; Loss 0.12
+
+predict_probs.glove = model_glove %>% 
+  # predict probability of presence of chest.pain symptoms
+  keras::predict_proba(x_test, 
+                       batch_size = 64)
+
+
+prob_threshold = 0.98
+predict_classes_glove <- if_else(predict_probs.glove[,1] > prob_threshold, 1, 0)
+
+n.predicted.glove = table(predict_classes_glove)[[2]]
+
+cm_glove = caret::confusionMatrix(factor(predict_classes_glove, levels = c(0, 1)), 
+                                  factor(y_test, levels = c(0, 1)),
+                                  positive = "1")
+
+data.frame(N.True = n.true, # 81
+           N.Predicted = n.predicted.glove, # 79
+           Accuracy = cm_glove$overall[["Accuracy"]], # 0.992
+           Precision = cm_glove$byClass[["Precision"]], # 0.215
+           Recall = cm_glove$byClass[["Recall"]], # 0.209
+           F1 = cm_glove$byClass[["F1"]]) # 0.212
+```
+
+```{r document_accuracy_w2v}
+
+t_glove = data.frame(report_no = test_notes$report_no,
+               truth = test_notes$chest.pain,
+               prediction = predict_classes_glove) %>%
+  group_by(report_no) %>%
+  summarise(truth = sum(truth),
+            prediction = sum(prediction)) %>%
+  transmute(truth = ifelse(truth > 0 , 1, 0),
+            prediction = ifelse(prediction > 0, 1, 0))
+  
+cm_doc_glove = caret::confusionMatrix(factor(t_glove$prediction, levels = c(0, 1)),
+                            factor(t_glove$truth, levels = c(0, 1)),
+                            positive = "1")
+
+
+data.frame(N.True = sum(t_glove$truth), # 40
+           N.Predicted = sum(t_glove$prediction), # 53
+           Accuracy = cm_doc_glove$overall[["Accuracy"]], # 0.671
+           Precision = cm_doc_glove$byClass[["Precision"]], # 0.433
+           Recall = cm_doc_glove$byClass[["Recall"]], # 0.575
+           F1 = cm_doc_glove$byClass[["F1"]]) # 0.494
+```
+
