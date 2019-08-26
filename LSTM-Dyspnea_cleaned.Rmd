@@ -1,5 +1,5 @@
 ---
-title: "Optimizing SVM"
+title: "Optimizing LSTM"
 output: html_document
 params:
   data_folder: "~/Desktop/DSI_NimbleMiner/NimbleMiner_ML/data/"
@@ -35,19 +35,16 @@ invisible(lapply(pkg, library, character.only = TRUE))
 options(warn = 0)
 
 category = "Dyspnea" # remaining consistent with prior development
-source("~/Desktop/DSI_NimbleMiner/NimbleMiner_ML/create_matrix_FIX.R")
 ```
 
 ### Data import
 
 ```{r gold_standard}
 # LOADING ORIGINAL DATASET (GOLD STANDARD)
-gold_standard <- file.path(params$data_folder, 'gold_standard_HF_100_pt_AV.csv')
+gold_standard <- file.path(params$data_folder, 'test_150_sentences.csv')
 
 clinical_notes_raw_data <- gold_standard %>% 
   readr::read_csv() %>% 
-  # X1 is the index column, unselect this column
-  select(-X1) %>% 
   # report_head indicates the start of a note
   mutate(report_head = str_detect(Note, "^admission date"))
 
@@ -255,11 +252,11 @@ cm = caret::confusionMatrix(factor(predict_classes, levels = c(0, 1)),
                             positive = "1")
 
 data.frame(N.True = n.true, # 105
-           N.Predicted = n.predicted, # 185
-           Accuracy = cm$overall[["Accuracy"]], # 0.989
-           Precision = cm$byClass[["Precision"]], # 0.437
-           Recall = cm$byClass[["Recall"]], # 0.771
-           F1 = cm$byClass[["F1"]]) # 0.558
+           N.Predicted = n.predicted, # 317
+           Accuracy = cm$overall[["Accuracy"]], # 0.986
+           Precision = cm$byClass[["Precision"]], # 0.381
+           Recall = cm$byClass[["Recall"]], # 0.801
+           F1 = cm$byClass[["F1"]]) # 0.517
 ```
 
 
@@ -396,8 +393,8 @@ cm_glove = caret::confusionMatrix(factor(predict_classes_glove, levels = c(0, 1)
 data.frame(N.True = n.true, # 105
            N.Predicted = n.predicted.glove, # 195
            Accuracy = cm_glove$overall[["Accuracy"]], # 0.988
-           Precision = cm_glove$byClass[["Precision"]], # 0.415
-           Recall = cm_glove$byClass[["Recall"]], # 0.771
-           F1 = cm_glove$byClass[["F1"]]) # 0.540
+           Precision = cm_glove$byClass[["Precision"]], # 0.379
+           Recall = cm_glove$byClass[["Recall"]], # 0.490
+           F1 = cm_glove$byClass[["F1"]]) # 0.427
 ```
 
