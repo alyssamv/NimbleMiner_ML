@@ -98,6 +98,7 @@ no_original_report = max(test_notes$report_no) # 95 notes in gold standard
 
 ```
 
+151/17099 sentences (0.88\%) have evidence of dyspnea.
 
 ```{r labeled_training_notes}
 labeled_data_path <- file.path(params$data_folder, 'training_notes_NMlabeled_chunk1.csv')
@@ -128,6 +129,11 @@ training_notes <- training_notes_raw %>%
   filter(!report_head) %>%
   replace(is.na(.), 0) %>%
   select(-report_head)
+
+# neg_indices = which(training_notes$Label == FALSE)
+# pos_indices = which(training_notes$Label == TRUE)
+# pos_sample = sample(pos_indices, size = length(pos_indices)/3, replace = FALSE)
+# training_notes <- training_notes[sort(c(pos_sample, neg_indices)), ]
 
 training_notes <- training_notes[1:(nrow(test_notes)*2), ]
 
