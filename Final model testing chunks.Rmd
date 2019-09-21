@@ -1,0 +1,921 @@
+---
+title: "Final model testing chunk sizes for Dyspnea"
+output: html_document
+params:
+  data_folder: "~/Desktop/DSI_NimbleMiner/NimbleMiner_ML/data/"
+  model_folder: "~/Desktop/DSI_NimbleMiner/NimbleMiner_ML/model/"
+  result_folder: "~/Desktop/DSI_NimbleMiner/NimbleMiner_ML/results/"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+pkg <- c("devtools"
+        ,"pander"
+        ,"knitr"
+        ,"dplyr"
+        ,"tidyr"
+        ,"stringr"
+        ,"lubridate"
+        ,"purrr"
+        ,"DT"
+        ,"tidytext"
+        ,"ggplot2"
+        ,"textstem"
+        ,"tm"
+        ,"splitstackshape"
+        ,"text2vec"
+        ,"reshape"
+        ,"readr"
+        ,"zoo"
+        ,"keras"
+        ,"rword2vec"
+        ,"reticulate"
+        ,"caret"
+        ,"ROCR")
+invisible(lapply(pkg, library, character.only = TRUE))
+options(warn = 0)
+```
+
+```{r sourcing_helpers}
+source("~/Desktop/DSI_NimbleMiner/NimbleMiner_ML/functions/gary fns.R")
+```
+
+```{r fasttext_wikinews_embeddings}
+lines <- readLines(file.path(params$data_folder, "wiki-news-300d-1M.vec"))
+# print(length(lines)) # 999995
+embeddings_index_fasttext_wikinews <- new.env(hash = TRUE, parent = emptyenv())
+
+for (i in 1:length(lines)) {
+  print(paste('============', round((i/length(lines))*100, 2), '%', '============'))
+  line <- lines[[i]]
+  values <- strsplit(line, " ")[[1]]
+  word <- values[[1]]
+  embeddings_index_fasttext_wikinews[[word]] <- as.double(values[-1])
+}
+
+```
+
+## Sentence-level
+
+```{r 1data_test_creation, message = FALSE, warning = FALSE, results = 'hide'}
+# LOADING ORIGINAL DATASET (GOLD STANDARD)
+file_name_1 <- file.path(params$data_folder, 'dyspnea_sentences_test.csv')
+clinical_notes_raw_data_1 <- file_name_1 %>% 
+  readr::read_csv() #%>% 
+  # report_head indicates the start of a note
+  #mutate(report_head = str_detect(Note, "^admission date"))
+
+# report_head contains the column report_no, a unique identifier for each report
+# the report_head dataframe contain report_no, a unique indentifier for each report
+# report_head_1 <- clinical_notes_raw_data_1 %>% 
+#   filter(report_head) %>% 
+#   select(Note, report_head) %>% 
+#   mutate(report_no = row_number()) %>% 
+#   select(-report_head)
+
+# clinical_notes_gold_standard_1 <- clinical_notes_raw_data_1 %>% 
+  # joint with report_head dataframe, report_no show which report each sentence belongs to
+  # left_join(report_head_1, by =c("Note")) %>% 
+  # mutate(report_no = na.locf(report_no),
+  #        # remove all numbers
+  #        Note = removeNumbers(Note)) %>% 
+  # mutate(Note = removeNumbers(Note)) %>%
+  # remove lines with no sentences
+  # filter(Note != "") %>% 
+  # remove unnecessary whitespaces
+  # mutate(note_processed = str_squish(Note),
+  #        dyspnea = as.numeric(Label)) %>% 
+  # replace NA with 0
+  # replace(is.na(.), 0)
+
+# # Labels for gold_standard dataset
+# label_gold_standard_1 <- clinical_notes_gold_standard_1 %>% 
+#   group_by(report_no) %>% 
+#   summarize_if(is.numeric, list(sum)) %>% 
+#   mutate_at(vars(-report_no), list(labeling))
+
+# # Full gold standard dataset
+# clinical_notes_test_1 <- clinical_notes_gold_standard_1 %>% 
+#   group_by(report_no) %>% 
+#   summarize(note_processed = paste(note_processed, collapse = " ")) %>% 
+#   merge(label_gold_standard_1, by = c("report_no")) %>% 
+#   #mutate(with_labels = if_else(rowSums(.[3:7]) > 0, TRUE, FALSE)) %>% 
+#   transmute(note_processed,
+#             report_no,
+#             Label)
+# 
+# # LOADING ADDITIONAL GOLD STANDARD DATASET
+# file_name_2 <- file.path(params$data_folder, 'NEW GOLD ST HF SYMPTOMS_150_notes_F.csv')
+# clinical_notes_test_2 <- file_name_2  %>% 
+#   readr::read_csv() %>% 
+#   filter(!is.na(Note)) %>% 
+#   transmute(note_processed = str_squish(removeNumbers(Note)),
+#             report_no = row_number() + nrow(clinical_notes_test_1),
+#             dyspnea = `Dyspnea (# of simclins)`,
+#             chest.pain = `Chest.pain (# of simclins)`,
+#             fatique = `Fatigue (# of simclins)`,
+#             nausea = `Nausea (# of simclins)`,
+#             cough = `Cough (# of simclins)`) %>% 
+#   mutate(with_labels = if_else(rowSums(.[3:7]) > 0, TRUE, FALSE)) %>% 
+#   transmute(note_processed,
+#             report_no,
+#             with_labels,
+#             dyspnea,
+#             chest.pain,
+#             fatique,
+#             nausea,
+#             cough)
+# clinical_notes_test <- clinical_notes_test_1 %>% 
+#   bind_rows(clinical_notes_test_2)
+clinical_notes_test <- clinical_notes_raw_data_1 %>%
+  select(note_processed, dyspnea)
+```
+
+
+```{r 1data_training_creation, message = FALSE, warning = FALSE, results = 'hide'}
+# SENTENCES BY SIMCLINS
+# Same logic for processing dataset as above
+file_name_simclins <- file.path(params$data_folder, 'training_notes_NMlabeled_chunk1.csv')
+simclins <- file_name_simclins %>% 
+  readr::read_csv() %>% 
+  transmute(note_processed = str_squish(removeNumbers(Note)),
+            with_labels = Label,
+            dyspnea = as.numeric(Label)) %>% 
+  replace(is.na(.), 0)
+
+clinical_notes_training <- simclins %>% 
+  mutate_at(vars(dyspnea),
+            list(labeling))
+
+clinical_notes_training <- clinical_notes_training[1:(nrow(clinical_notes_test)*3), ]
+```
+
+
+
+```{r 10data_prep_note_dyspnea}
+
+num_word_training <- clinical_notes_training %>% 
+  mutate(sentence_length = sapply(strsplit(note_processed, " "), length)) %>% 
+  pull(sentence_length)
+quantile(num_word_training, c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1))
+
+length = 2400
+
+data_dyspnea_note1 <- data_processing(clinical_notes_training,
+                                       clinical_notes_test,
+                                       max_length = length,
+                                       max_words = 15000,
+                                       exclude_stop_words = FALSE,
+                                       seed = 1174,
+                                       train_validation_split = 0.8,
+                                       label = "dyspnea")
+```
+
+
+```{r 1_model_deep_covnet_train}
+model_1_deep_covnet_dyspnea <- model_deep_covnet(max_len = length,
+                                                       max_features = 15000,
+                                                       optimizer = "rmsprop",
+                                                       loss = "binary_crossentropy")
+result_1_deep_covnet_dyspnea <- train_validate_test(data_dyspnea_note1,
+                                                     model = model_1_deep_covnet_dyspnea,
+                                                     epoch = 10,
+                                                     batch_size = 64,
+                                                     model_folder = params$model_folder)
+saveRDS(result_1_deep_covnet_dyspnea, 
+        file.path(params$result_folder, "result_1_deep_covnet_dyspnea.rds"))
+```
+
+```{r 1_model_deep_covnet_cm}
+model_1_deep_covnet_dyspnea <- load_model_hdf5(file.path(params$model_folder,
+                                                               "model_1_deep_covnet_dyspnea.h5"))
+generate_metrics(model_1_deep_covnet_dyspnea,
+                 data_dyspnea_note1,
+                 threshold = 0.5)
+optimal_threshold <- get_optimal_threshold(model_1_deep_covnet_dyspnea,
+                                           data_dyspnea_note1,
+                                           interval = 0.005)$optimal_threshold
+print(optimal_threshold)
+generate_metrics(model_1_deep_covnet_dyspnea,
+                 data_dyspnea_note1,
+                 threshold = optimal_threshold)
+```
+
+```{r 1_model_deep_covnet_fasttext_train}
+model_1_deep_covnet_fasttext <- model_deep_covnet_embeddings(max_len = length,
+                                                              max_features = 15000,
+                                                              embedding_dim = 300,
+                                                              embeddings_index = embeddings_index_fasttext_wikinews,
+                                                              word_index = data_dyspnea_note1$word_index,
+                                                              optimizer = "rmsprop",
+                                                              loss = "binary_crossentropy")
+result_1_deep_covnet_fasttext <- train_validate_test(data_dyspnea_note1,
+                                                      model = model_1_deep_covnet_fasttext,
+                                                      epoch = 10,
+                                                      batch_size = 64,
+                                                      model_folder = params$model_folder)
+saveRDS(result_1_deep_covnet_fasttext, 
+        file.path(params$result_folder, "result_1_deep_covnet_fasttext.rds"))
+```
+
+```{r 1_model_deep_covnet_fasttext_cm}
+model_1_deep_covnet_fasttext <- load_model_hdf5(file.path(params$model_folder,
+                                                               "model_1_deep_covnet_fasttext.h5"))
+generate_metrics(model_1_deep_covnet_fasttext,
+                 data_dyspnea_note1,
+                 threshold = 0.5)
+optimal_threshold <- get_optimal_threshold(model_1_deep_covnet_fasttext,
+                                           data_dyspnea_note1,
+                                           interval = 0.05)$optimal_threshold
+print(optimal_threshold)
+generate_metrics(model_1_deep_covnet_fasttext,
+                 data_dyspnea_note1,
+                 threshold = optimal_threshold)
+```
+
+```{r 1_model_deep_covnet_blstm_train}
+model_1_deep_covnet_blstm <- model_deep_covnet_blstm(max_len = length,
+                                                      max_features = 15000,
+                                                      optimizer = "rmsprop",
+                                                      loss = "binary_crossentropy")
+result_1_deep_covnet_blstm <- train_validate_test(data_dyspnea_note1,
+                                                   model = model_1_deep_covnet_blstm,
+                                                   epoch = 10,
+                                                   batch_size = 64,
+                                                   model_folder = params$model_folder)
+saveRDS(result_1_deep_covnet_blstm, 
+        file.path(params$result_folder, "result_1_deep_covnet_blstm.rds"))
+```
+
+```{r 1_model_deep_covnet_blstm_cm}
+model_1_deep_covnet_blstm <- load_model_hdf5(file.path(params$model_folder,
+                                                             "model_1_deep_covnet_blstm.h5"))
+generate_metrics(model_1_deep_covnet_blstm,
+                 data_dyspnea_note1,
+                 threshold = 0.5)
+optimal_threshold <- get_optimal_threshold(model_1_deep_covnet_blstm,
+                                           data_dyspnea_note1,
+                                           interval = 0.05)$optimal_threshold
+print(optimal_threshold)
+generate_metrics(model_1_deep_covnet_blstm,
+                 data_dyspnea_note1,
+                 threshold = optimal_threshold)
+```
+
+
+## Chunks of 10 sentences 
+
+```{r 10data_test_creation, message = FALSE, warning = FALSE, results = 'hide'}
+# LOADING ORIGINAL DATASET (GOLD STANDARD)
+file_name_1 <- file.path(params$data_folder, 'dyspnea_test_chunk10.csv')
+clinical_notes_raw_data_1 <- file_name_1 %>% 
+  readr::read_csv() #%>% 
+  # report_head indicates the start of a note
+  #mutate(report_head = str_detect(Note, "^admission date"))
+
+# report_head contains the column report_no, a unique identifier for each report
+# the report_head dataframe contain report_no, a unique indentifier for each report
+# report_head_1 <- clinical_notes_raw_data_1 %>% 
+#   filter(report_head) %>% 
+#   select(Note, report_head) %>% 
+#   mutate(report_no = row_number()) %>% 
+#   select(-report_head)
+
+clinical_notes_gold_standard_1 <- clinical_notes_raw_data_1 %>% 
+  # joint with report_head dataframe, report_no show which report each sentence belongs to
+  # left_join(report_head_1, by =c("Note")) %>% 
+  # mutate(report_no = na.locf(report_no),
+  #        # remove all numbers
+  #        Note = removeNumbers(Note)) %>% 
+  mutate(Note = removeNumbers(Note)) %>%
+  # remove lines with no sentences
+  filter(Note != "") %>% 
+  # remove unnecessary whitespaces
+  mutate(note_processed = str_squish(Note),
+         dyspnea = as.numeric(Label)) %>% 
+  # replace NA with 0
+  replace(is.na(.), 0)
+
+# # Labels for gold_standard dataset
+# label_gold_standard_1 <- clinical_notes_gold_standard_1 %>% 
+#   group_by(report_no) %>% 
+#   summarize_if(is.numeric, list(sum)) %>% 
+#   mutate_at(vars(-report_no), list(labeling))
+
+# # Full gold standard dataset
+# clinical_notes_test_1 <- clinical_notes_gold_standard_1 %>% 
+#   group_by(report_no) %>% 
+#   summarize(note_processed = paste(note_processed, collapse = " ")) %>% 
+#   merge(label_gold_standard_1, by = c("report_no")) %>% 
+#   #mutate(with_labels = if_else(rowSums(.[3:7]) > 0, TRUE, FALSE)) %>% 
+#   transmute(note_processed,
+#             report_no,
+#             Label)
+# 
+# # LOADING ADDITIONAL GOLD STANDARD DATASET
+# file_name_2 <- file.path(params$data_folder, 'NEW GOLD ST HF SYMPTOMS_150_notes_F.csv')
+# clinical_notes_test_2 <- file_name_2  %>% 
+#   readr::read_csv() %>% 
+#   filter(!is.na(Note)) %>% 
+#   transmute(note_processed = str_squish(removeNumbers(Note)),
+#             report_no = row_number() + nrow(clinical_notes_test_1),
+#             dyspnea = `Dyspnea (# of simclins)`,
+#             chest.pain = `Chest.pain (# of simclins)`,
+#             fatique = `Fatigue (# of simclins)`,
+#             nausea = `Nausea (# of simclins)`,
+#             cough = `Cough (# of simclins)`) %>% 
+#   mutate(with_labels = if_else(rowSums(.[3:7]) > 0, TRUE, FALSE)) %>% 
+#   transmute(note_processed,
+#             report_no,
+#             with_labels,
+#             dyspnea,
+#             chest.pain,
+#             fatique,
+#             nausea,
+#             cough)
+# clinical_notes_test <- clinical_notes_test_1 %>% 
+#   bind_rows(clinical_notes_test_2)
+clinical_notes_test <- clinical_notes_gold_standard_1 %>%
+  select(-Label, -Note, -Chunk_cats)
+```
+
+
+```{r 10data_training_creation, message = FALSE, warning = FALSE, results = 'hide'}
+# SENTENCES BY SIMCLINS
+# Same logic for processing dataset as above
+file_name_simclins <- file.path(params$data_folder, 'dyspnea_training_notes_NMlabeled_chunk10.csv')
+simclins <- file_name_simclins %>% 
+  readr::read_csv() %>% 
+  transmute(note_processed = str_squish(removeNumbers(Note)),
+            with_labels = Label,
+            dyspnea = as.numeric(Label)) %>% 
+  replace(is.na(.), 0)
+
+clinical_notes_training <- simclins %>% 
+  mutate_at(vars(dyspnea),
+            list(labeling))
+
+clinical_notes_training <- clinical_notes_training[1:(nrow(clinical_notes_test)*3), ]
+```
+
+
+
+```{r 10data_prep_note_dyspnea}
+
+num_word_training <- clinical_notes_training %>% 
+  mutate(sentence_length = sapply(strsplit(note_processed, " "), length)) %>% 
+  pull(sentence_length)
+quantile(num_word_training, c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1))
+
+length = 2400
+
+data_dyspnea_note10 <- data_processing(clinical_notes_training,
+                                       clinical_notes_test,
+                                       max_length = length,
+                                       max_words = 15000,
+                                       exclude_stop_words = FALSE,
+                                       seed = 1174,
+                                       train_validation_split = 0.8,
+                                       label = "dyspnea")
+```
+
+
+```{r 10_model_deep_covnet_train}
+model_10_deep_covnet_dyspnea <- model_deep_covnet(max_len = length,
+                                                       max_features = 15000,
+                                                       optimizer = "rmsprop",
+                                                       loss = "binary_crossentropy")
+result_10_deep_covnet_dyspnea <- train_validate_test(data_dyspnea_note10,
+                                                     model = model_10_deep_covnet_dyspnea,
+                                                     epoch = 10,
+                                                     batch_size = 64,
+                                                     model_folder = params$model_folder)
+saveRDS(result_10_deep_covnet_dyspnea, 
+        file.path(params$result_folder, "result_10_deep_covnet_dyspnea.rds"))
+```
+
+```{r 10_model_deep_covnet_cm}
+model_10_deep_covnet_dyspnea <- load_model_hdf5(file.path(params$model_folder,
+                                                               "model_10_deep_covnet_dyspnea.h5"))
+generate_metrics(model_10_deep_covnet_dyspnea,
+                 data_dyspnea_note10,
+                 threshold = 0.5)
+optimal_threshold <- get_optimal_threshold(model_10_deep_covnet_dyspnea,
+                                           data_dyspnea_note10,
+                                           interval = 0.005)$optimal_threshold
+print(optimal_threshold)
+generate_metrics(model_10_deep_covnet_dyspnea,
+                 data_dyspnea_note10,
+                 threshold = optimal_threshold)
+```
+
+```{r 10_model_deep_covnet_fasttext_train}
+model_10_deep_covnet_fasttext <- model_deep_covnet_embeddings(max_len = length,
+                                                              max_features = 15000,
+                                                              embedding_dim = 300,
+                                                              embeddings_index = embeddings_index_fasttext_wikinews,
+                                                              word_index = data_dyspnea_note10$word_index,
+                                                              optimizer = "rmsprop",
+                                                              loss = "binary_crossentropy")
+result_10_deep_covnet_fasttext <- train_validate_test(data_dyspnea_note10,
+                                                      model = model_10_deep_covnet_fasttext,
+                                                      epoch = 10,
+                                                      batch_size = 64,
+                                                      model_folder = params$model_folder)
+saveRDS(result_10_deep_covnet_fasttext, 
+        file.path(params$result_folder, "result_10_deep_covnet_fasttext.rds"))
+```
+
+```{r 10_model_deep_covnet_fasttext_cm}
+model_10_deep_covnet_fasttext <- load_model_hdf5(file.path(params$model_folder,
+                                                               "model_10_deep_covnet_fasttext.h5"))
+generate_metrics(model_10_deep_covnet_fasttext,
+                 data_dyspnea_note10,
+                 threshold = 0.5)
+optimal_threshold <- get_optimal_threshold(model_10_deep_covnet_fasttext,
+                                           data_dyspnea_note10,
+                                           interval = 0.05)$optimal_threshold
+print(optimal_threshold)
+generate_metrics(model_10_deep_covnet_fasttext,
+                 data_dyspnea_note10,
+                 threshold = optimal_threshold)
+```
+
+```{r 10_model_deep_covnet_blstm_train}
+model_10_deep_covnet_blstm <- model_deep_covnet_blstm(max_len = length,
+                                                      max_features = 15000,
+                                                      optimizer = "rmsprop",
+                                                      loss = "binary_crossentropy")
+result_10_deep_covnet_blstm <- train_validate_test(data_dyspnea_note10,
+                                                   model = model_10_deep_covnet_blstm,
+                                                   epoch = 10,
+                                                   batch_size = 64,
+                                                   model_folder = params$model_folder)
+saveRDS(result_10_deep_covnet_blstm, 
+        file.path(params$result_folder, "result_10_deep_covnet_blstm.rds"))
+```
+
+```{r 10_model_deep_covnet_blstm_cm}
+model_10_deep_covnet_blstm <- load_model_hdf5(file.path(params$model_folder,
+                                                             "model_10_deep_covnet_blstm.h5"))
+generate_metrics(model_10_deep_covnet_blstm,
+                 data_dyspnea_note10,
+                 threshold = 0.5)
+optimal_threshold <- get_optimal_threshold(model_10_deep_covnet_blstm,
+                                           data_dyspnea_note10,
+                                           interval = 0.05)$optimal_threshold
+print(optimal_threshold)
+generate_metrics(model_10_deep_covnet_blstm,
+                 data_dyspnea_note10,
+                 threshold = optimal_threshold)
+```
+
+## Chunks of 50 sentences
+
+```{r data_test_creation, message = FALSE, warning = FALSE, results = 'hide'}
+# LOADING ORIGINAL DATASET (GOLD STANDARD)
+file_name_1 <- file.path(params$data_folder, 'dyspnea_test_chunk50.csv')
+clinical_notes_raw_data_1 <- file_name_1 %>% 
+  readr::read_csv() #%>% 
+  # report_head indicates the start of a note
+  #mutate(report_head = str_detect(Note, "^admission date"))
+
+# report_head contains the column report_no, a unique identifier for each report
+# the report_head dataframe contain report_no, a unique indentifier for each report
+# report_head_1 <- clinical_notes_raw_data_1 %>% 
+#   filter(report_head) %>% 
+#   select(Note, report_head) %>% 
+#   mutate(report_no = row_number()) %>% 
+#   select(-report_head)
+
+clinical_notes_gold_standard_1 <- clinical_notes_raw_data_1 %>% 
+  # joint with report_head dataframe, report_no show which report each sentence belongs to
+  # left_join(report_head_1, by =c("Note")) %>% 
+  # mutate(report_no = na.locf(report_no),
+  #        # remove all numbers
+  #        Note = removeNumbers(Note)) %>% 
+  mutate(Note = removeNumbers(Note)) %>%
+  # remove lines with no sentences
+  filter(Note != "") %>% 
+  # remove unnecessary whitespaces
+  mutate(note_processed = str_squish(Note),
+         dyspnea = as.numeric(Label)) %>% 
+  # replace NA with 0
+  replace(is.na(.), 0)
+
+# # Labels for gold_standard dataset
+# label_gold_standard_1 <- clinical_notes_gold_standard_1 %>% 
+#   group_by(report_no) %>% 
+#   summarize_if(is.numeric, list(sum)) %>% 
+#   mutate_at(vars(-report_no), list(labeling))
+
+# # Full gold standard dataset
+# clinical_notes_test_1 <- clinical_notes_gold_standard_1 %>% 
+#   group_by(report_no) %>% 
+#   summarize(note_processed = paste(note_processed, collapse = " ")) %>% 
+#   merge(label_gold_standard_1, by = c("report_no")) %>% 
+#   #mutate(with_labels = if_else(rowSums(.[3:7]) > 0, TRUE, FALSE)) %>% 
+#   transmute(note_processed,
+#             report_no,
+#             Label)
+# 
+# # LOADING ADDITIONAL GOLD STANDARD DATASET
+# file_name_2 <- file.path(params$data_folder, 'NEW GOLD ST HF SYMPTOMS_150_notes_F.csv')
+# clinical_notes_test_2 <- file_name_2  %>% 
+#   readr::read_csv() %>% 
+#   filter(!is.na(Note)) %>% 
+#   transmute(note_processed = str_squish(removeNumbers(Note)),
+#             report_no = row_number() + nrow(clinical_notes_test_1),
+#             dyspnea = `Dyspnea (# of simclins)`,
+#             chest.pain = `Chest.pain (# of simclins)`,
+#             fatique = `Fatigue (# of simclins)`,
+#             nausea = `Nausea (# of simclins)`,
+#             cough = `Cough (# of simclins)`) %>% 
+#   mutate(with_labels = if_else(rowSums(.[3:7]) > 0, TRUE, FALSE)) %>% 
+#   transmute(note_processed,
+#             report_no,
+#             with_labels,
+#             dyspnea,
+#             chest.pain,
+#             fatique,
+#             nausea,
+#             cough)
+# clinical_notes_test <- clinical_notes_test_1 %>% 
+#   bind_rows(clinical_notes_test_2)
+clinical_notes_test <- clinical_notes_gold_standard_1 %>%
+  select(-Label, -Note, -Chunk_cats)
+```
+
+
+```{r data_training_creation, message = FALSE, warning = FALSE, results = 'hide'}
+# SENTENCES BY SIMCLINS
+# Same logic for processing dataset as above
+file_name_simclins <- file.path(params$data_folder, 'NMtrain_labeled_dyspnea_chunk50.csv')
+simclins <- file_name_simclins %>% 
+  readr::read_csv() %>% 
+  transmute(note_processed = str_squish(removeNumbers(Note)),
+            with_labels = Label,
+            dyspnea = `Dyspnea (# of simclins)`) %>% 
+  replace(is.na(.), 0)
+
+clinical_notes_training <- simclins %>% 
+  mutate_at(vars(dyspnea),
+            list(labeling))
+
+clinical_notes_training <- clinical_notes_training[1:(nrow(clinical_notes_test)*3), ]
+```
+
+
+
+```{r data_prep_note_dyspnea}
+num_word_training <- clinical_notes_training %>% 
+  mutate(sentence_length = sapply(strsplit(note_processed, " "), length)) %>% 
+  pull(sentence_length)
+quantile(num_word_training, c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1))
+
+
+# Choose 15000
+clinical_notes_training %>% 
+  unnest_tokens(output = "word",
+                input = "note_processed",
+                token = "words") %>% 
+  count(word, sort = TRUE) %>% 
+  slice(1:15000) %>% 
+  tail()
+
+
+data_dyspnea_note <- data_processing(clinical_notes_training,
+                                     clinical_notes_test,
+                                     max_length = 2400,
+                                     max_words = 15000,
+                                     exclude_stop_words = FALSE,
+                                     seed = 1174,
+                                     train_validation_split = 0.8,
+                                     label = "dyspnea")
+```
+
+
+```{r dyspnea_model_deep_covnet_train}
+model_50_deep_covnet_dyspnea <- model_deep_covnet(max_len = 2400,
+                                                       max_features = 15000,
+                                                       optimizer = "rmsprop",
+                                                       loss = "binary_crossentropy")
+result_50_deep_covnet_dyspnea <- train_validate_test(data_dyspnea_note,
+                                                     model = model_50_deep_covnet_dyspnea,
+                                                     epoch = 10,
+                                                     batch_size = 64,
+                                                     model_folder = params$model_folder)
+saveRDS(result_50_deep_covnet_dyspnea, 
+        file.path(params$result_folder, "result_50_deep_covnet_dyspnea.rds"))
+```
+
+```{r dyspnea_model_deep_covnet_cm}
+model_50_deep_covnet_dyspnea <- load_model_hdf5(file.path(params$model_folder,
+                                                               "model_50_deep_covnet_dyspnea.h5"))
+generate_metrics(model_50_deep_covnet_dyspnea,
+                 data_dyspnea_note,
+                 threshold = 0.5)
+optimal_threshold <- get_optimal_threshold(model_50_deep_covnet_dyspnea,
+                                           data_dyspnea_note,
+                                           interval = 0.005)$optimal_threshold
+print(optimal_threshold)
+generate_metrics(model_50_deep_covnet_dyspnea,
+                 data_dyspnea_note,
+                 threshold = optimal_threshold)
+```
+
+```{r dyspnea_model_deep_covnet_fasttext_train}
+model_50_deep_covnet_fasttext <- model_deep_covnet_embeddings(max_len = 2400,
+                                                              max_features = 15000,
+                                                              embedding_dim = 300,
+                                                              embeddings_index = embeddings_index_fasttext_wikinews,
+                                                              word_index = data_dyspnea_note$word_index,
+                                                              optimizer = "rmsprop",
+                                                              loss = "binary_crossentropy")
+result_50_deep_covnet_fasttext <- train_validate_test(data_dyspnea_note,
+                                                      model = model_50_deep_covnet_fasttext,
+                                                      epoch = 10,
+                                                      batch_size = 64,
+                                                      model_folder = params$model_folder)
+saveRDS(result_50_deep_covnet_fasttext, 
+        file.path(params$result_folder, "result_50_deep_covnet_fasttext.rds"))
+```
+
+```{r dyspnea_model_deep_covnet_fasttext_cm}
+model_50_deep_covnet_fasttext <- load_model_hdf5(file.path(params$model_folder,
+                                                               "model_50_deep_covnet_fasttext.h5"))
+generate_metrics(model_50_deep_covnet_fasttext,
+                 data_dyspnea_note,
+                 threshold = 0.5)
+optimal_threshold <- get_optimal_threshold(model_50_deep_covnet_fasttext,
+                                           data_dyspnea_note,
+                                           interval = 0.05)$optimal_threshold
+print(optimal_threshold)
+generate_metrics(model_50_deep_covnet_fasttext,
+                 data_dyspnea_note,
+                 threshold = optimal_threshold)
+```
+
+```{r dyspnea_model_deep_covnet_blstm_train}
+model_50_deep_covnet_blstm <- model_deep_covnet_blstm(max_len = 2400,
+                                                      max_features = 15000,
+                                                      optimizer = "rmsprop",
+                                                      loss = "binary_crossentropy")
+result_50_deep_covnet_blstm <- train_validate_test(data_dyspnea_note,
+                                                   model = model_50_deep_covnet_blstm,
+                                                   epoch = 10,
+                                                   batch_size = 64,
+                                                   model_folder = params$model_folder)
+saveRDS(result_50_deep_covnet_blstm, 
+        file.path(params$result_folder, "result_50_deep_covnet_blstm.rds"))
+```
+
+```{r dyspnea_model_deep_covnet_blstm_cm}
+model_50_deep_covnet_blstm <- load_model_hdf5(file.path(params$model_folder,
+                                                             "model_50_deep_covnet_blstm.h5"))
+generate_metrics(model_50_deep_covnet_blstm,
+                 data_dyspnea_note,
+                 threshold = 0.5)
+optimal_threshold <- get_optimal_threshold(model_50_deep_covnet_blstm,
+                                           data_dyspnea_note,
+                                           interval = 0.05)$optimal_threshold
+print(optimal_threshold)
+generate_metrics(model_50_deep_covnet_blstm,
+                 data_dyspnea_note,
+                 threshold = optimal_threshold)
+```
+
+
+## Full note
+
+```{r data_test_creation, message = FALSE, warning = FALSE, results = 'hide'}
+# LOADING ORIGINAL DATASET (GOLD STANDARD)
+file_name_1 <- file.path(params$data_folder, 'gold_standard_HF_150.csv')
+clinical_notes_raw_data_1 <- file_name_1 %>% 
+  readr::read_csv() %>% 
+  # X1 is the index column, unselect this column
+  select(-X1) %>% 
+  # report_head indicates the start of a note
+  mutate(report_head = str_detect(Note, "^admission date"))
+# report_head contains the column report_no, a unique identifier for each report
+# the report_head dataframe contain report_no, a unique indentifier for each report
+report_head_1 <- clinical_notes_raw_data_1 %>% 
+  filter(report_head) %>% 
+  select(Note, report_head) %>% 
+  mutate(report_no = row_number()) %>% 
+  select(-report_head)
+clinical_notes_gold_standard_1 <- clinical_notes_raw_data_1 %>% 
+  # joint with report_head dataframe, report_no show which report each sentence belongs to
+  left_join(report_head_1, by =c("Note")) %>% 
+  mutate(report_no = na.locf(report_no),
+         # remove all numbers
+         Note = removeNumbers(Note)) %>% 
+  # remove lines with no sentences
+  filter(Note != "") %>% 
+  # remove unnecessary whitespaces
+  mutate(note_processed = str_squish(Note)) %>% 
+  transmute(note_processed,
+            cat1 = `Category 1`,
+            cat2 = `Category 2`,
+            cat3 = `Category 3`,
+            cat4 = `Category 4`,
+            cat5 = `Category 5`,
+            cat6 = `Category 6`,
+            cat7 = `Category 7`,
+            report_head,
+            report_no) %>% 
+  # Create 14 label columns (one-hot encoding)
+  transmute(note_processed,
+            report_head,
+            report_no,
+            dyspnea = if_else((cat1 == "Dyspnea")|(cat2 == "Dyspnea"), 1, 0),
+            chest.pain = if_else((cat1 == "Chest.pain")|(cat2 == "Chest.pain"),1,0),
+            fatique = if_else((cat1 == "Fatigue")|(cat2 == "Fatigue"), 1, 0),
+            nausea = if_else((cat1 == "Nausea")|(cat2 == "Nausea"),1,0),
+            cough = if_else((cat1 == "Cough")|(cat2 == "Cough"),1,0)) %>% 
+  # replace NA with 0
+  replace(is.na(.), 0)
+# Labels for gold_standard dataset
+label_gold_standard_1 <- clinical_notes_gold_standard_1 %>% 
+  group_by(report_no) %>% 
+  summarize_if(is.numeric, list(sum)) %>% 
+  mutate_at(vars(-report_no), list(labeling))
+# Full gold standard dataset
+clinical_notes_test_1 <- clinical_notes_gold_standard_1 %>% 
+  group_by(report_no) %>% 
+  summarize(note_processed = paste(note_processed, collapse = " ")) %>% 
+  merge(label_gold_standard_1, by = c("report_no")) %>% 
+  mutate(with_labels = if_else(rowSums(.[3:7]) > 0, TRUE, FALSE)) %>% 
+  transmute(note_processed,
+            report_no,
+            with_labels,
+            dyspnea,
+            chest.pain,
+            fatique,
+            nausea,
+            cough)
+# LOADING ADDITIONAL GOLD STANDARD DATASET
+file_name_2 <- file.path(params$data_folder, 'NEW GOLD ST HF SYMPTOMS_150_notes_F.csv')
+clinical_notes_test_2 <- file_name_2  %>% 
+  readr::read_csv() %>% 
+  filter(!is.na(Note)) %>% 
+  transmute(note_processed = str_squish(removeNumbers(Note)),
+            report_no = row_number() + nrow(clinical_notes_test_1),
+            dyspnea = `Dyspnea (# of simclins)`,
+            chest.pain = `Chest.pain (# of simclins)`,
+            fatique = `Fatigue (# of simclins)`,
+            nausea = `Nausea (# of simclins)`,
+            cough = `Cough (# of simclins)`) %>% 
+  mutate(with_labels = if_else(rowSums(.[3:7]) > 0, TRUE, FALSE)) %>% 
+  transmute(note_processed,
+            report_no,
+            with_labels,
+            dyspnea,
+            chest.pain,
+            fatique,
+            nausea,
+            cough)
+clinical_notes_test <- clinical_notes_test_1 %>% 
+  bind_rows(clinical_notes_test_2)
+```
+
+
+```{r data_training_creation, message = FALSE, warning = FALSE, results = 'hide'}
+# SENTENCES BY SIMCLINS
+# Same logic for processing dataset as above
+file_name_simclins <- file.path(params$data_folder, 'labeled-data-2019-07-23_14-35.csv')
+simclins <- file_name_simclins %>% 
+  readr::read_csv() %>% 
+  transmute(report_no = X1,
+            note_processed = str_squish(removeNumbers(Note)),
+         with_labels = Label,
+         dyspnea = `Dyspnea (# of simclins)`,
+         chest.pain = `Chest.pain (# of simclins)`,
+         fatique = `Fatigue (# of simclins)`,
+         nausea = `Nausea (# of simclins)`,
+         cough = `Cough (# of simclins)`) %>% 
+    replace(is.na(.), 0)
+clinical_notes_training <- simclins %>% 
+  mutate_at(vars(dyspnea, 
+                 chest.pain,
+                 fatique,
+                 nausea,
+                 cough),
+            list(labeling))
+```
+
+
+
+```{r training_word_count}
+# Choose 15000
+clinical_notes_training %>% 
+  unnest_tokens(output = "word",
+                input = "note_processed",
+                token = "words") %>% 
+  count(word, sort = TRUE) %>% 
+  slice(1:15000) %>% 
+  tail()
+```
+
+
+```{r data_prep_note_dyspnea}
+data_full_note <- data_processing(clinical_notes_training,
+                                     clinical_notes_test,
+                                     max_length = 2400,
+                                     max_words = 15000,
+                                     exclude_stop_words = FALSE,
+                                     seed = 1174,
+                                     train_validation_split = 0.8,
+                                     label = "dyspnea")
+```
+
+```{r full_model_deep_covnet_train}
+model_full_deep_covnet_full <- model_deep_covnet(max_len = 2400,
+                                                       max_features = 15000,
+                                                       optimizer = "rmsprop",
+                                                       loss = "binary_crossentropy")
+result_full_deep_covnet_full <- train_validate_test(data_full_note,
+                                                          model = model_full_deep_covnet_full,
+                                                          epoch = 10,
+                                                          batch_size = 64,
+                                                          model_folder = params$model_folder)
+saveRDS(result_full_deep_covnet_full, 
+        file.path(params$result_folder, "result_full_deep_covnet_full.rds"))
+```
+
+```{r full_model_deep_covnet_cm}
+model_full_deep_covnet_full <- load_model_hdf5(file.path(params$model_folder,
+                                                               "model_full_deep_covnet_full.h5"))
+generate_metrics(model_full_deep_covnet_full,
+                 data_full_note,
+                 threshold = 0.5)
+optimal_threshold <- get_optimal_threshold(model_full_deep_covnet_full,
+                                           data_full_note,
+                                           interval = 0.005)$optimal_threshold
+print(optimal_threshold)
+generate_metrics(model_full_deep_covnet_full,
+                 data_full_note,
+                 threshold = optimal_threshold)
+```
+
+```{r full_model_deep_covnet_fasttext_train}
+model_full_deep_covnet_fasttext <- model_deep_covnet_embeddings(max_len = 2400,
+                                                                           max_features = 15000,
+                                                                           embedding_dim = 300,
+                                                                           embeddings_index = embeddings_index_fasttext_wikinews,
+                                                                           word_index = data_full_note$word_index,
+                                                                           optimizer = "rmsprop",
+                                                                           loss = "binary_crossentropy")
+result_full_deep_covnet_fasttext <- train_validate_test(data_full_note,
+                                                           model = model_full_deep_covnet_fasttext,
+                                                           epoch = 10,
+                                                           batch_size = 64,
+                                                           model_folder = params$model_folder)
+saveRDS(result_full_deep_covnet_fasttext, 
+        file.path(params$result_folder, "result_full_deep_covnet_fasttext.rds"))
+```
+
+```{r full_model_deep_covnet_fasttext_cm}
+model_full_deep_covnet_fasttext <- load_model_hdf5(file.path(params$model_folder,
+                                                               "model_full_deep_covnet_fasttext.h5"))
+generate_metrics(model_full_deep_covnet_fasttext,
+                 data_full_note,
+                 threshold = 0.5)
+optimal_threshold <- get_optimal_threshold(model_full_deep_covnet_fasttext,
+                                           data_full_note,
+                                           interval = 0.05)$optimal_threshold
+print(optimal_threshold)
+generate_metrics(model_full_deep_covnet_fasttext,
+                 data_full_note,
+                 threshold = optimal_threshold)
+```
+
+```{r full_model_deep_covnet_blstm_train}
+model_full_deep_covnet_blstm <- model_deep_covnet_blstm(max_len = 2400,
+                                                           max_features = 15000,
+                                                           optimizer = "rmsprop",
+                                                           loss = "binary_crossentropy")
+result_full_deep_covnet_blstm <- train_validate_test(data_full_note,
+                                                        model = model_full_deep_covnet_blstm,
+                                                        epoch = 10,
+                                                        batch_size = 64,
+                                                        model_folder = params$model_folder)
+saveRDS(result_full_deep_covnet_blstm, 
+        file.path(params$result_folder, "result_full_deep_covnet_blstm.rds"))
+```
+
+```{r full_model_deep_covnet_blstm_cm}
+model_full_deep_covnet_blstm <- load_model_hdf5(file.path(params$model_folder,
+                                                             "model_full_deep_covnet_blstm.h5"))
+generate_metrics(model_full_deep_covnet_blstm,
+                 data_full_note,
+                 threshold = 0.5)
+optimal_threshold <- get_optimal_threshold(model_full_deep_covnet_blstm,
+                                           data_full_note,
+                                           interval = 0.05)$optimal_threshold
+print(optimal_threshold)
+generate_metrics(model_full_deep_covnet_blstm,
+                 data_full_note,
+                 threshold = optimal_threshold)
+```

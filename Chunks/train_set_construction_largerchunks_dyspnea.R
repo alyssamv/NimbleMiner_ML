@@ -14,7 +14,7 @@ load("/Users/Alyssa/Desktop/DSI_NimbleMiner/NimbleMiner_ML/Chunks/train_doc_labe
 start.all = Sys.time()
 n.notes = 10000 # number of full notes to read in 
 cat = "Dyspnea"
-chunk_size = 3 # size of chunks
+chunk_size = 10 # size of chunks
 
 
 ################################################ 
@@ -156,7 +156,7 @@ test.csv = paste0("dyspnea_test_chunk", chunk_size, ".csv")
 
 save.image(paste0(app_dir, "Chunks/", rdata))
 write.csv(train_beta, paste0(app_dir, "data/", train.csv), row.names = FALSE)
-write.csv(train_beta, paste0(app_dir, "data/", test.csv), row.names = FALSE)
+write.csv(test, paste0(app_dir, "data/", test.csv), row.names = FALSE)
 
 end.all = Sys.time()
 
